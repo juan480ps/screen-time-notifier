@@ -100,23 +100,36 @@ class ScreenTimeNotifier:
         return random.choice(pool).format(time=time_str)
 
     @staticmethod
-    def play_notification_sound():
+    def _init_mixer():
+        """Inicializa pygame mixer una sola vez."""
         try:
-            if os.path.exists(NOTIFY_SOUND):
-                import pygame
-
+            import pygame
+            if not pygame.mixer.get_init():
                 pygame.mixer.init()
-                pygame.mixer.music.load(NOTIFY_SOUND)
-                pygame.mixer.music.set_volume(0.8)
-                pygame.mixer.music.play()
-            else:
-                import winsound
-
-                winsound.MessageBeep(winsound.MB_OK)
+            return True
         except Exception:
-            try:
-                import winsound
+            return False
 
-                winsound.MessageBeep(winsound.MB_OK)
+    @classmethod
+    def play_notification_sound(cls):
+        """Reproduce sonido en hilo background para no bloquear la UI."""
+        def _play():
+            try:
+                if os.path.exists(NOTIFY_SOUND):
+                    import pygame
+                    cls._init_mixer()
+                    pygame.mixer.music.load(NOTIFY_SOUND)
+                    pygame.mixer.music.set_volume(0.8)
+                    pygame.mixer.music.play()
+                else:
+                    import winsound
+                    winsound.MessageBeep(winsound.MB_OK)
             except Exception:
-                pass
+                try:
+                    import winsound
+                    winsound.MessageBeep(winsound.MB_OK)
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_play, daemon=True)
+        t.start()

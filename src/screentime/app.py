@@ -233,34 +233,23 @@ class ScreenTimeApp:
             overlay.overrideredirect(True)
             overlay.attributes("-topmost", True)
             overlay.attributes("-alpha", 0.95)
-            overlay.configure(bg="#1a1a2e")
+            overlay.configure(bg="#107C10")
 
-            screen_w = overlay.winfo_screenwidth()
-            overlay.geometry(f"380x90+{screen_w - 400}+20")
+            sw = overlay.winfo_screenwidth()
+            overlay.geometry(f"380x90+{sw - 400}+20")
 
-            frame = tk.Frame(overlay, bg="#107C10", padx=2, pady=2)
-            frame.pack(fill=tk.BOTH, expand=True)
-
-            inner = tk.Frame(frame, bg="#1a1a2e", padx=12, pady=8)
+            inner = tk.Frame(overlay, bg="#1a1a2e", padx=12, pady=8)
             inner.pack(fill=tk.BOTH, expand=True)
 
-            header = tk.Frame(inner, bg="#1a1a2e")
-            header.pack(fill=tk.X)
-
-            tk.Label(header, text="Screen Time", font=("Segoe UI", 10, "bold"), bg="#1a1a2e", fg="#107C10").pack(side=tk.LEFT, padx=5)
-
-            msg_label = tk.Label(
-                inner, text=message,
-                font=("Segoe UI", 9),
-                bg="#1a1a2e", fg="#e0e0e0",
-                wraplength=340, justify="left",
-            )
-            msg_label.pack(fill=tk.X, pady=(4, 0))
+            tk.Label(inner, text="Screen Time", font=("Segoe UI", 10, "bold"),
+                     bg="#1a1a2e", fg="#107C10").pack(anchor="w")
+            tk.Label(inner, text=message, font=("Segoe UI", 9),
+                     bg="#1a1a2e", fg="#e0e0e0", wraplength=340, justify="left",
+                     anchor="w").pack(fill=tk.X, pady=(4, 0))
 
             overlay_ms = self.settings.get("overlay_seconds", 8) * 1000
-            overlay.after(overlay_ms, overlay.destroy)
+            overlay.after(overlay_ms, lambda: overlay.destroy())
             overlay.bind("<Button-1>", lambda e: overlay.destroy())
-            overlay.update_idletasks()
         except Exception as e:
             _log(f"[Error] Overlay: {e}")
 
