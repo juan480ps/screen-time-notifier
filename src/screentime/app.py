@@ -5,15 +5,28 @@ import os
 import sys
 import ctypes
 import atexit
+import queue
 from datetime import date
 
-from screentime.config import load_settings, save_settings, get_app_name, get_app_version
+from screentime.config import load_settings, save_settings, get_app_name, get_app_version, DATA_DIR
 from screentime.logger import UsageLogger
 from screentime.notifier import ScreenTimeNotifier
 from screentime.gui import MainGUI, IntervalDialog, COLORS
 from screentime.tray_icon import TrayIcon
 from screentime.pomodoro import PomodoroTimer, PomodoroState
 from screentime.fullscreen_detector import FullscreenDetector
+
+LOG_FILE = os.path.join(DATA_DIR, "app.log")
+
+
+def _log(msg: str):
+    """Escribe un mensaje al log y a stdout."""
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{msg}\n")
+    except Exception:
+        pass
+    print(msg)
 
 
 class ScreenTimeApp:
@@ -28,6 +41,9 @@ class ScreenTimeApp:
         self.pomodoro = PomodoroTimer()
         self.fullscreen_detector = FullscreenDetector()
         self._screen_lock_triggered = False
+
+        # Cola thread-safe para notificaciones desde el hilo del timer
+        self._notification_queue = queue.Queue()
 
         self.notifier.set_interval_seconds(self.settings["interval_seconds"])
         self.notifier.set_notification_callback(self._on_notification)
@@ -77,7 +93,7 @@ class ScreenTimeApp:
         atexit.register(self._cleanup)
 
     def run(self):
-        print(f"[{get_app_name()} v{get_app_version()}] Iniciando...")
+        _log(f"[{get_app_name()} v{get_app_version()}] Iniciando...")
 
         self.tray.run()
         self.notifier.start()
@@ -90,7 +106,10 @@ class ScreenTimeApp:
         )
         self.gui.set_toggles_from_settings(self.settings)
 
-        print(f"[{get_app_name()}] Aplicación en ejecución.")
+        # Iniciar polling de la cola de notificaciones en el hilo principal
+        self._poll_notification_queue()
+
+        _log(f"[{get_app_name()}] Aplicacion en ejecucion.")
         interval_s = self.settings["interval_seconds"]
         if interval_s >= 3600:
             interval_str = f"{interval_s // 3600}h"
@@ -98,13 +117,51 @@ class ScreenTimeApp:
             interval_str = f"{interval_s // 60}min"
         else:
             interval_str = f"{interval_s}s"
-        print(f"[{get_app_name()}] Intervalo: {interval_str}")
-        print(f"[{get_app_name()}] Presiona Ctrl+C o cierra desde el tray para salir.")
+        _log(f"[{get_app_name()}] Intervalo: {interval_str}")
 
         try:
             self.gui.root.mainloop()
         except KeyboardInterrupt:
             self._on_quit()
+
+    # ─── Cola de notificaciones (thread-safe) ───────────────────────────
+
+    def _poll_notification_queue(self):
+        """Polling en el hilo principal: revisa la cola cada 200ms."""
+        try:
+            while True:
+                msg, check_lock = self._notification_queue.get_nowait()
+                self._do_show_notification(msg, check_lock)
+        except queue.Empty:
+            pass
+        if self.gui.root:
+            self.gui.root.after(200, self._poll_notification_queue)
+
+    def _do_show_notification(self, message: str, check_lock: bool = True):
+        """Ejecuta la notificacion en el hilo principal (seguro para tkinter)."""
+        try:
+            if self.settings["sound_enabled"]:
+                ScreenTimeNotifier.play_notification_sound()
+        except Exception as e:
+            _log(f"[Error] Sonido: {e}")
+
+        try:
+            self._toast_with_aumid(message)
+        except Exception as e:
+            _log(f"[Error] Toast: {e}")
+
+        try:
+            self._show_overlay(message)
+        except Exception as e:
+            _log(f"[Error] Overlay: {e}")
+
+        if check_lock:
+            try:
+                self._check_screen_lock()
+            except Exception as e:
+                _log(f"[Error] Screen lock: {e}")
+
+        _log(f"[Notificacion] {message}")
 
     # ─── Toggles ─────────────────────────────────────────────────────────
 
@@ -112,19 +169,19 @@ class ScreenTimeApp:
         self.settings["daily_goal_enabled"] = enabled
         save_settings(self.settings)
         state = "activada" if enabled else "desactivada"
-        print(f"[Meta diaria] {state}.")
+        _log(f"[Meta diaria] {state}.")
 
     def _on_daily_goal_change(self, hours: int):
         self.settings["daily_goal_hours"] = hours
         save_settings(self.settings)
         self.gui.set_daily_goal(hours)
-        print(f"[Meta diaria] Meta cambiada a {hours}h.")
+        _log(f"[Meta diaria] Meta cambiada a {hours}h.")
 
     def _toggle_pomodoro(self, enabled: bool):
         self.settings["pomodoro_enabled"] = enabled
         save_settings(self.settings)
         state = "activado" if enabled else "desactivado"
-        print(f"[Pomodoro] Modo {state}.")
+        _log(f"[Pomodoro] Modo {state}.")
         if enabled and not self.pomodoro.is_running:
             self._start_pomodoro()
         elif not enabled and self.pomodoro.is_running:
@@ -139,20 +196,21 @@ class ScreenTimeApp:
                 on_exit=self._on_fullscreen_exit,
             )
             self.fullscreen_detector.start()
-            print("[Modo juego] Activado.")
+            _log("[Modo juego] Activado.")
         else:
             self.fullscreen_detector.stop()
             self.gui.game_status_dot.configure(fg=COLORS["text_secondary"])
-            print("[Modo juego] Desactivado.")
+            _log("[Modo juego] Desactivado.")
 
     def _toggle_screen_lock(self, enabled: bool):
         self.settings["screen_lock_enabled"] = enabled
         save_settings(self.settings)
         self._screen_lock_triggered = False
         state = "activado" if enabled else "desactivado"
-        print(f"[Bloqueo de pantalla] {state}.")
+        _log(f"[Bloqueo de pantalla] {state}.")
 
     def _on_notification(self):
+        """Callback desde el hilo del timer — solo encola."""
         elapsed = self.logger.get_elapsed_formatted()
         elapsed_minutes = self.logger.get_elapsed_minutes()
 
@@ -163,24 +221,14 @@ class ScreenTimeApp:
         goal_reached_pct = (total_today / (goal_hours * 3600)) * 100
 
         if goal_enabled and goal_reached_pct >= 100:
-            message = f"⚠️ ¡Meta diaria alcanzada! Llevas {elapsed} conectado hoy."
+            message = f"Meta diaria alcanzada! Llevas {elapsed} conectado hoy."
         elif goal_enabled and goal_reached_pct >= warn_pct:
-            message = f"⏰ Llevas {elapsed}. Estás al {int(goal_reached_pct)}% de tu meta diaria."
+            message = f"Llevas {elapsed}. Estas al {int(goal_reached_pct)}% de tu meta diaria."
         else:
             is_warning = elapsed_minutes >= self.settings["warning_threshold_minutes"]
             message = self.notifier.get_random_message(elapsed, is_warning)
 
-        if self.settings["sound_enabled"]:
-            ScreenTimeNotifier.play_notification_sound()
-
-        self._show_windows_toast(message)
-        self._check_screen_lock()
-        print(f"[Notificación] {message}")
-
-    def _show_windows_toast(self, message: str):
-        self._toast_with_aumid(message)
-        if self.gui.root:
-            self.gui.root.after(0, self._show_overlay, message)
+        self._notification_queue.put((message, True))
 
     def _toast_with_aumid(self, message: str):
         try:
@@ -234,7 +282,6 @@ $toast.Group = "screentime"
             header = tk.Frame(inner, bg="#1a1a2e")
             header.pack(fill=tk.X)
 
-            tk.Label(header, text="🎮", font=("Segoe UI Emoji", 14), bg="#1a1a2e", fg="white").pack(side=tk.LEFT)
             tk.Label(header, text="Screen Time", font=("Segoe UI", 10, "bold"), bg="#1a1a2e", fg="#107C10").pack(side=tk.LEFT, padx=5)
 
             msg_label = tk.Label(
@@ -249,8 +296,8 @@ $toast.Group = "screentime"
             overlay.after(overlay_ms, overlay.destroy)
             overlay.bind("<Button-1>", lambda e: overlay.destroy())
             overlay.update_idletasks()
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"[Error] Overlay: {e}")
 
     def _start_tray_updater(self):
         self._tray_update_running = True
@@ -273,7 +320,7 @@ $toast.Group = "screentime"
         if self.gui.root:
             self.gui.root.after(2000, self._update_tray)
 
-    # ─── Acciones del menú ───────────────────────────────────────────────
+    # ─── Acciones del menu ───────────────────────────────────────────────
 
     def _on_show_time(self):
         if self.gui.is_visible:
@@ -284,22 +331,22 @@ $toast.Group = "screentime"
     def _on_reset(self):
         self.logger.save_session()
         self.logger.reset()
-        print("[Acción] Contador reiniciado.")
-        self._show_windows_toast("🔄 Contador reiniciado. ¡Nueva sesión!")
+        _log("[Accion] Contador reiniciado.")
+        self._notification_queue.put(("Contador reiniciado. Nueva sesion!", False))
 
     def _on_pause_toggle(self):
         if self.notifier.is_paused:
             self.notifier.resume()
             self.logger.resume()
-            self.gui.status_var.set("● Activo")
-            print("[Acción] Notificaciones reanudadas.")
-            self._show_windows_toast("▶ Notificaciones reanudadas.")
+            self.gui.status_var.set("Activo")
+            _log("[Accion] Notificaciones reanudadas.")
+            self._notification_queue.put(("Notificaciones reanudadas.", False))
         else:
             self.notifier.pause()
             self.logger.pause()
-            self.gui.status_var.set("⏸ Pausado")
-            print("[Acción] Notificaciones pausadas.")
-            self._show_windows_toast("⏸ Notificaciones pausadas.")
+            self.gui.status_var.set("Pausado")
+            _log("[Accion] Notificaciones pausadas.")
+            self._notification_queue.put(("Notificaciones pausadas.", False))
 
     def _on_configure(self):
         dialog = IntervalDialog(self.gui.root, self.settings["interval_seconds"])
@@ -317,8 +364,8 @@ $toast.Group = "screentime"
             else:
                 val = new_interval
                 unit = "segundo" if val == 1 else "segundos"
-            print(f"[Acción] Intervalo cambiado a {val} {unit}.")
-            self._show_windows_toast(f"⚙ Intervalo cambiado a {val} {unit}.")
+            _log(f"[Accion] Intervalo cambiado a {val} {unit}.")
+            self._notification_queue.put((f"Intervalo cambiado a {val} {unit}.", False))
 
     def _on_interval_change_from_gui(self, seconds: int):
         self.settings["interval_seconds"] = seconds
@@ -333,26 +380,26 @@ $toast.Group = "screentime"
         else:
             val = seconds
             unit = "segundo" if val == 1 else "segundos"
-        print(f"[Acción] Intervalo cambiado a {val} {unit}.")
-        self._show_windows_toast(f"⚙ Intervalo cambiado a {val} {unit}.")
+        _log(f"[Accion] Intervalo cambiado a {val} {unit}.")
+        self._notification_queue.put((f"Intervalo cambiado a {val} {unit}.", False))
 
     def _on_overlay_change_from_gui(self, seconds: int):
         self.settings["overlay_seconds"] = seconds
         save_settings(self.settings)
-        print(f"[Acción] Duración del popup cambiada a {seconds}s.")
+        _log(f"[Accion] Duracion del popup cambiada a {seconds}s.")
 
     # ─── Pomodoro ────────────────────────────────────────────────────────
 
     def _start_pomodoro(self):
         self.pomodoro.start()
-        print("[Pomodoro] Iniciado.")
+        _log("[Pomodoro] Iniciado.")
 
     def _stop_pomodoro(self):
         self.pomodoro.stop()
         self.gui.pomodoro_state_var.set("Inactivo")
         self.gui.pomodoro_timer_var.set("00:00")
         self.gui.pomodoro_cycle_var.set("0/4")
-        print("[Pomodoro] Detenido.")
+        _log("[Pomodoro] Detenido.")
 
     def _skip_pomodoro(self):
         self.pomodoro.skip()
@@ -370,11 +417,11 @@ $toast.Group = "screentime"
             self.gui.pomodoro_state_var.set(label)
             self.gui.pomodoro_cycle_var.set(f"{cycle}/{total}")
             if state == PomodoroState.WORK:
-                self._show_windows_toast(f"🎮 Pomodoro: ¡A trabajar! Ciclo {cycle}/{total}")
+                self._notification_queue.put((f"Pomodoro: A trabajar! Ciclo {cycle}/{total}", False))
             elif state == PomodoroState.BREAK:
-                self._show_windows_toast(f"☕ Pomodoro: Descanso ({self.pomodoro.get_remaining_formatted()})")
+                self._notification_queue.put((f"Pomodoro: Descanso ({self.pomodoro.get_remaining_formatted()})", False))
             elif state == PomodoroState.LONG_BREAK:
-                self._show_windows_toast(f"🏖️ Pomodoro: ¡Descanso largo! ({self.pomodoro.get_remaining_formatted()})")
+                self._notification_queue.put((f"Pomodoro: Descanso largo! ({self.pomodoro.get_remaining_formatted()})", False))
         except Exception:
             pass
 
@@ -384,13 +431,13 @@ $toast.Group = "screentime"
         if self.settings.get("game_mode_enabled", False):
             self.notifier.pause()
             self.gui.game_status_dot.configure(fg=COLORS["accent_green_light"])
-            print("[Modo Juego] Pantalla completa detectada. Notificaciones pausadas.")
+            _log("[Modo Juego] Pantalla completa detectada. Notificaciones pausadas.")
 
     def _on_fullscreen_exit(self):
         if self.settings.get("game_mode_enabled", False):
             self.notifier.resume()
             self.gui.game_status_dot.configure(fg=COLORS["text_secondary"])
-            print("[Modo Juego] Pantalla completa terminada. Notificaciones reanudadas.")
+            _log("[Modo Juego] Pantalla completa terminada. Notificaciones reanudadas.")
 
     # ─── Bloqueo de pantalla ─────────────────────────────────────────────
 
@@ -402,8 +449,7 @@ $toast.Group = "screentime"
         elapsed = self.logger.get_elapsed_seconds()
         if elapsed >= lock_seconds and not self._screen_lock_triggered:
             self._screen_lock_triggered = True
-            if self.gui.root:
-                self.gui.root.after(0, self._show_screen_lock_overlay)
+            self._show_screen_lock_overlay()
 
     def _show_screen_lock_overlay(self):
         try:
@@ -418,8 +464,7 @@ $toast.Group = "screentime"
             frame = tk.Frame(overlay, bg="#000000")
             frame.pack(fill=tk.BOTH, expand=True)
 
-            tk.Label(frame, text="⏸", font=("Segoe UI Emoji", 60), bg="#000000", fg="white").pack(pady=(80, 10))
-            tk.Label(frame, text="¡Hora de descansar!", font=("Segoe UI", 24, "bold"), bg="#000000", fg="#107C10").pack()
+            tk.Label(frame, text="Hora de descansar!", font=("Segoe UI", 24, "bold"), bg="#000000", fg="#107C10").pack(pady=(80, 10))
             tk.Label(
                 frame,
                 text="Llevas mucho tiempo frente a la pantalla.\nEstira las piernas, descansa la vista.",
@@ -437,13 +482,13 @@ $toast.Group = "screentime"
             ).pack(pady=40)
 
             overlay.bind("<Escape>", lambda e: [overlay.destroy(), self._reset_screen_lock()])
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"[Error] Screen lock overlay: {e}")
 
     def _reset_screen_lock(self):
         self._screen_lock_triggered = False
         self.logger.reset()
-        print("[Bloqueo] Contador reiniciado.")
+        _log("[Bloqueo] Contador reiniciado.")
 
     # ─── Exportar CSV ────────────────────────────────────────────────────
 
@@ -471,10 +516,10 @@ $toast.Group = "screentime"
                     hours = round(total_s / 3600, 2)
                     writer.writerow([day_str, sessions, total_s, hours])
 
-            print(f"[Export] Historial exportado a: {file_path}")
-            self._show_windows_toast(f"📊 Historial exportado a {os.path.basename(file_path)}")
+            _log(f"[Export] Historial exportado a: {file_path}")
+            self._notification_queue.put((f"Historial exportado a {os.path.basename(file_path)}", False))
         except Exception as e:
-            print(f"[Export] Error: {e}")
+            _log(f"[Export] Error: {e}")
 
     def _on_autostart_toggle(self):
         self.settings["auto_start"] = not self.settings["auto_start"]
@@ -482,8 +527,8 @@ $toast.Group = "screentime"
         self._set_windows_autostart(self.settings["auto_start"])
 
         estado = "activado" if self.settings["auto_start"] else "desactivado"
-        print(f"[Acción] Inicio automático {estado}.")
-        self._show_windows_toast(f"🚀 Inicio automático {estado}.")
+        _log(f"[Accion] Inicio automatico {estado}.")
+        self._notification_queue.put((f"Inicio automatico {estado}.", False))
 
     def _set_windows_autostart(self, enable: bool):
         try:
@@ -507,10 +552,10 @@ $toast.Group = "screentime"
 
             winreg.CloseKey(key)
         except Exception as e:
-            print(f"[Error] No se pudo configurar inicio automático: {e}")
+            _log(f"[Error] No se pudo configurar inicio automatico: {e}")
 
     def _on_quit(self):
-        print(f"[{get_app_name()}] Cerrando aplicación...")
+        _log(f"[{get_app_name()}] Cerrando aplicacion...")
         self._tray_update_running = False
         self.notifier.stop()
         self.pomodoro.stop()
@@ -530,15 +575,15 @@ $toast.Group = "screentime"
 
 
 def check_single_instance():
-    """Verifica que no haya otra instancia de la app ejecutándose."""
+    """Verifica que no haya otra instancia de la app ejecutandose."""
     try:
         mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "ScreenTimeNotifier_SingleInstance")
         if ctypes.windll.kernel32.GetLastError() == 183:
-            print("Ya hay una instancia ejecutándose.")
+            _log("Ya hay una instancia ejecutandose.")
             ctypes.windll.user32.MessageBoxW(
                 0,
-                "Screen Time Notifier ya está corriendo (revisá el ícono en la "
-                "bandeja del sistema, puede estar oculto). Cerrala desde ahí "
+                "Screen Time Notifier ya esta corriendo (revisa el icono en la "
+                "bandeja del sistema, puede estar oculto). Cierra desde ahi "
                 "antes de volver a abrirla.",
                 "Screen Time Notifier",
                 0x40,
@@ -549,7 +594,7 @@ def check_single_instance():
 
 
 def main():
-    """Función principal de entrada."""
+    """Funcion principal de entrada."""
     check_single_instance()
     app = ScreenTimeApp()
     app.run()
