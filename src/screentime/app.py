@@ -146,11 +146,6 @@ class ScreenTimeApp:
             _log(f"[Error] Sonido: {e}")
 
         try:
-            self._toast_with_aumid(message)
-        except Exception as e:
-            _log(f"[Error] Toast: {e}")
-
-        try:
             self._show_overlay(message)
         except Exception as e:
             _log(f"[Error] Overlay: {e}")
@@ -229,36 +224,6 @@ class ScreenTimeApp:
             message = self.notifier.get_random_message(elapsed, is_warning)
 
         self._notification_queue.put((message, True))
-
-    def _toast_with_aumid(self, message: str):
-        try:
-            import subprocess
-
-            safe_msg = message.replace('"', '`"').replace("'", "''")
-
-            ps_script = f'''
-[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null
-
-$appId = "Microsoft.XboxGamingOverlay_8wekyb3d8bbwe!App"
-
-$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml("<toast><visual><binding template=`"ToastGeneric`"><text>Screen Time Notifier</text><text>{safe_msg}</text></binding></visual><audio src=`"ms-winsoundevent:Notification.Default`"/></toast>")
-
-$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-$toast.Tag = "screentime"
-$toast.Group = "screentime"
-
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)
-'''
-            subprocess.Popen(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
 
     def _show_overlay(self, message: str):
         try:
