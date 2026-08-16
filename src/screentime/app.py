@@ -383,15 +383,13 @@ class ScreenTimeApp:
 
     def _on_fullscreen_enter(self):
         if self.settings.get("game_mode_enabled", False):
-            self.notifier.pause()
             self.gui.game_status_dot.configure(fg=COLORS["accent_green_light"])
-            _log("[Modo Juego] Pantalla completa detectada. Notificaciones pausadas.")
+            _log("[Modo Juego] Pantalla completa detectada.")
 
     def _on_fullscreen_exit(self):
         if self.settings.get("game_mode_enabled", False):
-            self.notifier.resume()
             self.gui.game_status_dot.configure(fg=COLORS["text_secondary"])
-            _log("[Modo Juego] Pantalla completa terminada. Notificaciones reanudadas.")
+            _log("[Modo Juego] Pantalla completa terminada.")
 
     # ─── Bloqueo de pantalla ─────────────────────────────────────────────
 
