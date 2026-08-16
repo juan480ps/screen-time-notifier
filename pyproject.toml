@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "screen-time-notifier"
+version = "1.0.0"
+description = "Monitor de tiempo en pantalla para Windows con notificaciones estilo Xbox"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "pystray>=0.19.5",
+    "Pillow>=10.0.0",
+    "pygame>=2.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyinstaller>=6.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+screen-time = "screentime.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
