@@ -182,7 +182,7 @@ class ScreenTimeApp:
 
         threading.Thread(target=_do, daemon=True).start()
 
-    # ─── Toggles ─────────────────────────────────────────────────────────
+    def _do_show_notification(self, message: str, check_lock: bool = True):
         """Ejecuta la notificacion en el hilo principal (seguro para tkinter)."""
         try:
             if self.settings["sound_enabled"]:
