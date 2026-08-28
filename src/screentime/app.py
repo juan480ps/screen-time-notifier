@@ -6,6 +6,7 @@ import sys
 import ctypes
 import atexit
 import queue
+import threading
 from datetime import date
 
 from screentime.config import load_settings, save_settings, get_app_name, get_app_version, DATA_DIR
@@ -15,6 +16,7 @@ from screentime.gui import MainGUI, IntervalDialog, COLORS
 from screentime.tray_icon import TrayIcon
 from screentime.pomodoro import PomodoroTimer, PomodoroState
 from screentime.fullscreen_detector import FullscreenDetector
+from screentime.updater import check_for_update, download_and_update
 
 LOG_FILE = os.path.join(DATA_DIR, "app.log")
 
@@ -86,6 +88,7 @@ class ScreenTimeApp:
             on_pause_toggle=self._on_pause_toggle,
             on_configure=self._on_configure,
             on_autostart_toggle=self._on_autostart_toggle,
+            on_check_update=self._on_check_update,
             on_quit=self._on_quit,
         )
 
@@ -108,6 +111,9 @@ class ScreenTimeApp:
 
         # Iniciar polling de la cola de notificaciones en el hilo principal
         self._poll_notification_queue()
+
+        # Verificar actualizaciones en background
+        threading.Thread(target=self._startup_update_check, daemon=True).start()
 
         _log(f"[{get_app_name()}] Aplicacion en ejecucion.")
         interval_s = self.settings["interval_seconds"]
@@ -137,7 +143,46 @@ class ScreenTimeApp:
         if self.gui.root:
             self.gui.root.after(200, self._poll_notification_queue)
 
-    def _do_show_notification(self, message: str, check_lock: bool = True):
+    # ─── Auto-actualizacion ──────────────────────────────────────────────
+
+    def _startup_update_check(self):
+        """Verifica actualizaciones al iniciar (en background)."""
+        import time
+        time.sleep(5)
+        info = check_for_update()
+        if info:
+            self.tray.set_update_available(info["version"])
+            _log(f"[Update] Nueva version disponible: {info['version']}")
+
+    def _on_check_update(self):
+        """Callback del tray: buscar e instalar actualizacion."""
+        def _do():
+            info = check_for_update()
+            if not info:
+                self._notification_queue.put(("Ya tienes la ultima version.", False))
+                return
+
+            self.tray.set_update_available(info["version"])
+            _log(f"[Update] Descargando {info['version']}...")
+
+            def _on_progress(downloaded, total):
+                pct = int((downloaded / total) * 100) if total > 0 else 0
+                _log(f"[Update] Descargando... {pct}%")
+
+            ok = download_and_update(info, on_progress=_on_progress)
+            if ok:
+                _log("[Update] Actualizacion descargada. Reiniciando...")
+                self._notification_queue.put(("Actualizacion instalada. Reiniciando...", False))
+                import time
+                time.sleep(2)
+                os._exit(0)
+            else:
+                _log("[Update] Error al descargar la actualizacion.")
+                self._notification_queue.put(("Error al descargar la actualizacion.", False))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    # ─── Toggles ─────────────────────────────────────────────────────────
         """Ejecuta la notificacion en el hilo principal (seguro para tkinter)."""
         try:
             if self.settings["sound_enabled"]:

@@ -59,11 +59,14 @@ class TrayIcon:
         self._on_pause_toggle: Optional[Callable] = None
         self._on_configure: Optional[Callable] = None
         self._on_autostart_toggle: Optional[Callable] = None
+        self._on_check_update: Optional[Callable] = None
         self._on_quit: Optional[Callable] = None
 
         self._is_paused = False
         self._auto_start = False
         self._current_time = "00:00:00"
+        self._update_available = False
+        self._update_version = ""
 
     def set_callbacks(self, **kwargs):
         self._on_show = kwargs.get("on_show")
@@ -71,6 +74,7 @@ class TrayIcon:
         self._on_pause_toggle = kwargs.get("on_pause_toggle")
         self._on_configure = kwargs.get("on_configure")
         self._on_autostart_toggle = kwargs.get("on_autostart_toggle")
+        self._on_check_update = kwargs.get("on_check_update")
         self._on_quit = kwargs.get("on_quit")
 
     def update_state(self, is_paused: bool, auto_start: bool, current_time: str):
@@ -82,9 +86,27 @@ class TrayIcon:
             self._icon.title = f"{get_app_name()} — {status} — {current_time}"
             self._icon.menu = self._build_menu()
 
+    def set_update_available(self, version: str):
+        self._update_available = True
+        self._update_version = version
+        if self._icon:
+            self._icon.menu = self._build_menu()
+
     def _build_menu(self) -> pystray.Menu:
         pause_text = "▶ Reanudar" if self._is_paused else "⏸ Pausar"
         autostart_text = "✓ Iniciar con Windows" if self._auto_start else "  Iniciar con Windows"
+
+        if self._update_available:
+            update_text = f"⬆ Actualizar a {self._update_version}"
+            update_item = pystray.MenuItem(
+                update_text,
+                lambda: self._safe_call(self._on_check_update),
+            )
+        else:
+            update_item = pystray.MenuItem(
+                " Buscar actualizaciones",
+                lambda: self._safe_call(self._on_check_update),
+            )
 
         return pystray.Menu(
             pystray.MenuItem(
@@ -111,6 +133,7 @@ class TrayIcon:
                 lambda: self._safe_call(self._on_autostart_toggle),
             ),
             pystray.Menu.SEPARATOR,
+            update_item,
             pystray.MenuItem(
                 "❌ Salir",
                 lambda: self._safe_call(self._on_quit),
