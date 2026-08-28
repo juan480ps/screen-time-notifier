@@ -157,9 +157,13 @@ class ScreenTimeApp:
     def _on_check_update(self):
         """Callback del tray: buscar e instalar actualizacion."""
         def _do():
+            _log("[Update] Buscando actualizaciones...")
             info = check_for_update()
-            if not info:
+            if info is True:
                 self._notification_queue.put(("Ya tienes la ultima version.", False))
+                return
+            if info is None:
+                self._notification_queue.put(("Error al conectar con GitHub.", False))
                 return
 
             self.tray.set_update_available(info["version"])
