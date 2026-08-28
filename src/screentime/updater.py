@@ -92,20 +92,18 @@ def _create_update_batch(exe_path: str, new_exe_path: str) -> str:
     bat_path = os.path.join(tempfile.gettempdir(), "screentime_update.bat")
     bat_content = f'''@echo off
 echo Screen Time Notifier - Actualizando...
-timeout /t 5 /nobreak >nul
-:retry
-del "{exe_path}" 2>nul
-if exist "{exe_path}" (
-    timeout /t 2 /nobreak >nul
-    goto retry
-)
+timeout /t 3 /nobreak >nul
+move /y "{exe_path}" "{exe_path}.old" >nul 2>&1
 move /y "{new_exe_path}" "{exe_path}" >nul 2>&1
-if errorlevel 1 (
-    echo Error al reemplazar el ejecutable.
-    timeout /t 5 /nobreak >nul
-) else (
+if exist "{exe_path}" (
     echo Actualizacion completada. Iniciando...
     start "" "{exe_path}"
+    timeout /t 3 /nobreak >nul
+    del "{exe_path}.old" 2>nul
+) else (
+    echo Error: no se pudo reemplazar. Revirtiendo...
+    move /y "{exe_path}.old" "{exe_path}" >nul 2>&1
+    timeout /t 5 /nobreak >nul
 )
 del "%~f0"
 '''
