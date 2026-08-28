@@ -547,8 +547,12 @@ class MainGUI:
         self.lock_hours_var.set(str(settings.get("screen_lock_hours", 4)))
 
     def _start_update_loop(self):
-        self._update_display()
-        self._update_job = self.root.after(1000, self._start_update_loop)
+        try:
+            self._update_display()
+        except Exception:
+            pass
+        if self.root:
+            self._update_job = self.root.after(1000, self._start_update_loop)
 
     def _update_display(self):
         try:
@@ -647,41 +651,46 @@ class MainGUI:
         self._daily_goal_hours = hours
 
     def _draw_week_chart(self):
-        self.week_canvas.delete("all")
-        w = self.week_canvas.winfo_width()
-        h = self.week_canvas.winfo_height()
-        if w <= 1:
-            return
+        try:
+            self.week_canvas.delete("all")
+            w = self.week_canvas.winfo_width()
+            h = self.week_canvas.winfo_height()
+            if w <= 1:
+                return
 
-        week_stats = self.logger.get_week_stats()
-        days = list(reversed(list(week_stats.items())))
-        max_val = max((v for _, v in days), default=1) or 1
-        bar_width = max(20, (w - 40) // 7 - 5)
+            week_stats = self.logger.get_week_stats()
+            days = list(reversed(list(week_stats.items())))
+            if not days:
+                return
+            max_val = max((v for _, v in days), default=1) or 1
+            bar_width = max(20, (w - 40) // 7 - 5)
 
-        from datetime import date
+            from datetime import date
 
-        day_names = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+            day_names = ["Lun", "Mar", "Mie", "Jue", "Vie", "Sab", "Dom"]
 
-        for i, (day_str, seconds) in enumerate(days):
-            x = 20 + i * (bar_width + 5)
-            bar_h = max(2, int((seconds / max_val) * (h - 20)))
-            y_top = h - 15 - bar_h
-            y_bottom = h - 15
+            for i, (day_str, seconds) in enumerate(days):
+                x = 20 + i * (bar_width + 5)
+                bar_h = max(2, int((seconds / max_val) * (h - 20)))
+                y_top = h - 15 - bar_h
+                y_bottom = h - 15
 
-            color = COLORS["accent_green"] if seconds > 0 else COLORS["progress_bg"]
-            self.week_canvas.create_rectangle(x, y_top, x + bar_width, y_bottom, fill=color, outline="")
+                color = COLORS["accent_green"] if seconds > 0 else COLORS["progress_bg"]
+                self.week_canvas.create_rectangle(x, y_top, x + bar_width, y_bottom, fill=color, outline="")
 
-            try:
-                d = date.fromisoformat(day_str)
-                label = day_names[d.weekday()]
-            except (ValueError, IndexError):
-                label = day_str[-2:]
+                try:
+                    d = date.fromisoformat(day_str)
+                    label = day_names[d.weekday()]
+                except (ValueError, IndexError):
+                    label = day_str[-2:]
 
-            self.week_canvas.create_text(
-                x + bar_width // 2, h - 5,
-                text=label, fill=COLORS["text_secondary"],
-                font=("Segoe UI", 7),
-            )
+                self.week_canvas.create_text(
+                    x + bar_width // 2, h - 5,
+                    text=label, fill=COLORS["text_secondary"],
+                    font=("Segoe UI", 7),
+                )
+        except Exception:
+            pass
 
     def show(self):
         if self.root:
