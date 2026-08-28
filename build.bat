@@ -16,6 +16,7 @@ echo Creando ejecutable...
 pyinstaller --noconfirm --onefile --noconsole --name="ScreenTimeNotifier" ^
     --icon="assets\icon.ico" ^
     --add-data="assets;assets" ^
+    --version-file="version_info.txt" ^
     --hidden-import=pystray._win32 ^
     --hidden-import=PIL ^
     --hidden-import=pygame ^
