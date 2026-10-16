@@ -1,33 +1,40 @@
 """Punto de entrada principal de Screen Time Notifier."""
 
-import csv
-import os
-import sys
-import ctypes
 import atexit
+import csv
+import ctypes
+import os
 import queue
+import sys
 import threading
 from datetime import date
+from typing import Callable
 
-from screentime.config import load_settings, save_settings, get_app_name, get_app_version, DATA_DIR
+from screentime.config import get_app_name, get_app_version, load_settings, save_settings
+from screentime.dialogs import IntervalDialog
+from screentime.filelog import append_log
+from screentime.fullscreen_detector import FullscreenDetector
+from screentime.gui import MainGUI
 from screentime.logger import UsageLogger
 from screentime.notifier import ScreenTimeNotifier
-from screentime.gui import MainGUI, IntervalDialog, COLORS
+from screentime.pomodoro import PomodoroState, PomodoroTimer
+from screentime.shutdown import (
+    COUNTDOWN,
+    DEFAULT_GRACE_SECONDS,
+    DEFAULT_POSTPONE_MINUTES,
+    SHUTDOWN_MESSAGE,
+    ShutdownScheduler,
+    abort_os_shutdown,
+    schedule_os_shutdown,
+)
+from screentime.theme import COLORS
 from screentime.tray_icon import TrayIcon
-from screentime.pomodoro import PomodoroTimer, PomodoroState
-from screentime.fullscreen_detector import FullscreenDetector
 from screentime.updater import check_for_update, download_and_update
-
-LOG_FILE = os.path.join(DATA_DIR, "app.log")
 
 
 def _log(msg: str):
     """Escribe un mensaje al log y a stdout."""
-    try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{msg}\n")
-    except Exception:
-        pass
+    append_log(msg)
     print(msg)
 
 
@@ -42,13 +49,29 @@ class ScreenTimeApp:
         self.tray = TrayIcon()
         self.pomodoro = PomodoroTimer()
         self.fullscreen_detector = FullscreenDetector()
+        self.shutdown = ShutdownScheduler()
         self._screen_lock_triggered = False
+        self._os_shutdown_armed = False
 
         # Cola thread-safe para notificaciones desde el hilo del timer
         self._notification_queue = queue.Queue()
+        # Cola de tareas que deben ejecutarse en el hilo principal de tkinter
+        self._ui_tasks = queue.Queue()
 
         self.notifier.set_interval_seconds(self.settings["interval_seconds"])
         self.notifier.set_notification_callback(self._on_notification)
+
+        self.shutdown.configure(
+            enabled=self.settings.get("shutdown_enabled", False),
+            mode=self.settings.get("shutdown_mode", "hora"),
+            time_str=self.settings.get("shutdown_time", "23:00"),
+            minutes=self.settings.get("shutdown_minutes", 60),
+            warn_minutes=self.settings.get("shutdown_warn_minutes", 5),
+        )
+        self.shutdown.set_callbacks(
+            on_warning=self._on_shutdown_warning,
+            on_shutdown=self._on_shutdown_fire,
+        )
 
         self.gui._on_interval_change = self._on_interval_change_from_gui
         self.gui._on_overlay_change = self._on_overlay_change_from_gui
@@ -63,6 +86,13 @@ class ScreenTimeApp:
         self.gui._on_pomodoro_toggle = self._toggle_pomodoro
         self.gui._on_game_mode_toggle = self._toggle_game_mode
         self.gui._on_screen_lock_toggle = self._toggle_screen_lock
+        self.gui._on_screen_lock_hours_change = self._on_screen_lock_hours_change
+        self.gui._on_shutdown_change = self._on_shutdown_change_from_gui
+        self.gui._on_shutdown_now = self._on_shutdown_now
+        self.gui._on_shutdown_postpone = self._on_shutdown_postpone
+        self.gui._on_shutdown_cancel = self._on_shutdown_cancel
+        self.gui._on_autostart_toggle = self._set_autostart
+        self.gui._on_start_minimized_toggle = self._set_start_minimized
 
         self.pomodoro.configure(
             work_min=self.settings.get("pomodoro_work_minutes", 25),
@@ -88,6 +118,11 @@ class ScreenTimeApp:
             on_pause_toggle=self._on_pause_toggle,
             on_configure=self._on_configure,
             on_autostart_toggle=self._on_autostart_toggle,
+            on_minimized_toggle=self._on_minimized_toggle,
+            on_shutdown_toggle=self._on_shutdown_toggle,
+            on_shutdown_now=self._on_shutdown_now,
+            on_shutdown_postpone=self._on_shutdown_postpone,
+            on_shutdown_cancel=self._on_shutdown_cancel,
             on_check_update=self._on_check_update,
             on_quit=self._on_quit,
         )
@@ -100,9 +135,11 @@ class ScreenTimeApp:
 
         self.tray.run()
         self.notifier.start()
+        self.shutdown.start()
         self._start_tray_updater()
 
-        self.gui.create_window()
+        start_minimized = bool(self.settings.get("start_minimized", True))
+        self.gui.create_window(start_minimized=start_minimized)
         self.gui.set_interval_from_settings(
             self.settings["interval_seconds"],
             self.settings.get("overlay_seconds", 8),
@@ -111,6 +148,15 @@ class ScreenTimeApp:
 
         # Iniciar polling de la cola de notificaciones en el hilo principal
         self._poll_notification_queue()
+
+        if start_minimized:
+            _log(f"[{get_app_name()}] Iniciado minimizado (ventana oculta).")
+            self._notification_queue.put(
+                ("Iniciado minimizado. Clic en el icono del tray para abrir la ventana.", False)
+            )
+
+        if self.shutdown.is_enabled:
+            _log(f"[{get_app_name()}] {self.shutdown.status_text()}")
 
         # Verificar actualizaciones en background
         threading.Thread(target=self._startup_update_check, daemon=True).start()
@@ -140,8 +186,23 @@ class ScreenTimeApp:
                 self._do_show_notification(msg, check_lock)
         except queue.Empty:
             pass
+
+        try:
+            while True:
+                task = self._ui_tasks.get_nowait()
+                try:
+                    task()
+                except Exception as e:
+                    _log(f"[Error] Tarea UI: {e}")
+        except queue.Empty:
+            pass
+
         if self.gui.root:
             self.gui.root.after(200, self._poll_notification_queue)
+
+    def _post_ui(self, task: Callable):
+        """Agenda una tarea para que corra en el hilo principal de tkinter."""
+        self._ui_tasks.put(task)
 
     # ─── Auto-actualizacion ──────────────────────────────────────────────
 
@@ -150,13 +211,18 @@ class ScreenTimeApp:
         import time
         time.sleep(5)
         info = check_for_update()
-        if info:
+        if isinstance(info, dict):
             self.tray.set_update_available(info["version"])
             _log(f"[Update] Nueva version disponible: {info['version']}")
 
     def _on_check_update(self):
         """Callback del tray: buscar e instalar actualizacion."""
         def _do():
+            if not getattr(sys, "frozen", False):
+                self._notification_queue.put(
+                    ("La actualizacion automatica solo esta disponible en el ejecutable.", False)
+                )
+                return
             _log("[Update] Buscando actualizaciones...")
             info = check_for_update()
             if info is True:
@@ -253,6 +319,133 @@ class ScreenTimeApp:
         state = "activado" if enabled else "desactivado"
         _log(f"[Bloqueo de pantalla] {state}.")
 
+    def _on_screen_lock_hours_change(self, hours: int):
+        self.settings["screen_lock_hours"] = hours
+        save_settings(self.settings)
+        self._screen_lock_triggered = False
+        _log(f"[Bloqueo] Bloquear despues de {hours}h.")
+
+    # ─── Apagado automático ──────────────────────────────────────────────
+
+    def _on_shutdown_change_from_gui(self, config: dict):
+        """El usuario cambió la programación del apagado desde la ventana."""
+        is_countdown = config["mode"] == COUNTDOWN
+        self.settings["shutdown_enabled"] = config["enabled"]
+        self.settings["shutdown_mode"] = config["mode"]
+        self.settings["shutdown_time"] = config["time"]
+        self.settings["shutdown_minutes"] = config["minutes"]
+        self.settings["shutdown_warn_minutes"] = config["warn_minutes"]
+        save_settings(self.settings)
+
+        # Si ya había un apagado pedido a Windows, se cancela antes de reprogramar
+        had_os_shutdown = self._cancel_pending_os_shutdown()
+
+        self.shutdown.configure(
+            enabled=config["enabled"],
+            mode=config["mode"],
+            time_str=config["time"],
+            minutes=config["minutes"],
+            warn_minutes=config["warn_minutes"],
+        )
+        _log(f"[Apagado] {self.shutdown.status_text()}")
+        self._post_ui(lambda: self.gui.set_shutdown_status(self.shutdown.status_text()))
+
+        if config["enabled"]:
+            if is_countdown:
+                msg = f"El equipo se apagara en {config['minutes']} minutos."
+            else:
+                msg = f"El equipo se apagara a las {config['time']} (todos los dias)."
+        elif had_os_shutdown:
+            msg = "Apagado programado cancelado."
+        else:
+            return
+        self._notification_queue.put((msg, False))
+
+    def _on_shutdown_warning(self, remaining_seconds: float):
+        """Callback del scheduler (hilo monitor): aviso previo al apagado."""
+        minutes = max(1, int(round(remaining_seconds / 60.0)))
+        self._notification_queue.put(
+            (f"El equipo se apagara en {minutes} min. Cancelalo desde el menu del icono.", False)
+        )
+        _log(f"[Apagado] Aviso previo: faltan {minutes} min.")
+
+    def _on_shutdown_fire(self):
+        """Callback del scheduler (hilo monitor): pide el apagado a Windows."""
+        self._os_shutdown_armed = schedule_os_shutdown(DEFAULT_GRACE_SECONDS, SHUTDOWN_MESSAGE)
+        if self._os_shutdown_armed:
+            msg = f"Apagando el equipo en {DEFAULT_GRACE_SECONDS} segundos. Cancelar: menu del icono."
+            _log("[Apagado] Apagado programado (60 s de gracia).")
+        else:
+            msg = "No se pudo programar el apagado del equipo."
+            _log("[Apagado] Error al programar el apagado del equipo.")
+        self._notification_queue.put((msg, False))
+
+        # La cuenta atrás se consume: se desactiva sola
+        if self.shutdown.mode == COUNTDOWN:
+            self.settings["shutdown_enabled"] = False
+            save_settings(self.settings)
+            self.shutdown.cancel()
+            self._post_ui(lambda: self.gui.set_shutdown_enabled(False))
+
+    def _on_shutdown_now(self):
+        """Apaga el equipo en 60 s a petición del usuario (ventana o icono)."""
+        self._os_shutdown_armed = schedule_os_shutdown(DEFAULT_GRACE_SECONDS, SHUTDOWN_MESSAGE)
+        if self._os_shutdown_armed:
+            msg = f"Apagando el equipo en {DEFAULT_GRACE_SECONDS} segundos. Cancelar: menu del icono."
+        else:
+            msg = "No se pudo programar el apagado del equipo."
+        _log(f"[Apagado] {msg}")
+        self._notification_queue.put((msg, False))
+
+    def _on_shutdown_postpone(self):
+        """Retrasa el apagado pendiente (ventana o icono del tray)."""
+        if self.shutdown.postpone(DEFAULT_POSTPONE_MINUTES):
+            msg = f"Apagado pospuesto {DEFAULT_POSTPONE_MINUTES} min."
+            _log(f"[Apagado] Pospuesto: {self.shutdown.status_text()}")
+            self._post_ui(lambda: self.gui.set_shutdown_status(self.shutdown.status_text()))
+        else:
+            msg = "No hay apagado programado para posponer."
+        self._notification_queue.put((msg, False))
+
+    def _on_shutdown_cancel(self):
+        """Cancela el apagado pendiente y desactiva la programación."""
+        self._cancel_pending_os_shutdown()
+        self.shutdown.cancel()
+        self.settings["shutdown_enabled"] = False
+        save_settings(self.settings)
+        self._post_ui(lambda: self.gui.set_shutdown_enabled(False))
+        _log("[Apagado] Apagado cancelado y programacion desactivada.")
+        self._notification_queue.put(("Apagado cancelado. La programacion quedo desactivada.", False))
+
+    def _on_shutdown_toggle(self):
+        """Alterna la programación desde el icono del tray."""
+        enabled = not self.settings.get("shutdown_enabled", False)
+        config = {
+            "enabled": enabled,
+            "mode": self.settings.get("shutdown_mode", "hora"),
+            "time": self.settings.get("shutdown_time", "23:00"),
+            "minutes": self.settings.get("shutdown_minutes", 60),
+            "warn_minutes": self.settings.get("shutdown_warn_minutes", 5),
+        }
+        self._post_ui(lambda: self.gui.set_shutdown_enabled(enabled))
+        self._on_shutdown_change_from_gui(config)
+
+    def _cancel_pending_os_shutdown(self) -> bool:
+        """Aborta el apagado que Windows tiene en cuenta atrás, si existe."""
+        if not self._os_shutdown_armed:
+            return False
+        abort_os_shutdown()
+        self._os_shutdown_armed = False
+        return True
+
+    def _update_shutdown_status(self):
+        """Refresca el texto de estado en la ventana (solo hilo principal)."""
+        if self.gui.root:
+            try:
+                self.gui.set_shutdown_status(self.shutdown.status_text())
+            except Exception:
+                pass
+
     def _on_notification(self):
         """Callback desde el hilo del timer — solo encola."""
         elapsed = self.logger.get_elapsed_formatted()
@@ -316,12 +509,17 @@ class ScreenTimeApp:
                 is_paused=self.notifier.is_paused,
                 auto_start=self.settings.get("auto_start", False),
                 current_time=elapsed,
+                shutdown_status=self.shutdown.short_status(),
+                shutdown_enabled=self.shutdown.is_enabled,
+                start_minimized=self.settings.get("start_minimized", True),
             )
+            self._update_shutdown_status()
         except Exception:
             pass
 
         if self.gui.root:
-            self.gui.root.after(2000, self._update_tray)
+            # Cada segundo: la cuenta atrás del apagado debe latir en vivo
+            self.gui.root.after(1000, self._update_tray)
 
     # ─── Acciones del menu ───────────────────────────────────────────────
 
@@ -408,23 +606,35 @@ class ScreenTimeApp:
         self.pomodoro.skip()
 
     def _on_pomodoro_tick(self, state, remaining, cycle, total):
+        # Se ejecuta en el hilo del temporizador: solo se calculan los textos
+        # y la actualización de tkinter se agenda en el hilo principal.
+        remaining_fmt = self.pomodoro.get_remaining_formatted()
+        self._post_ui(lambda: self._apply_pomodoro_tick(remaining_fmt, cycle, total))
+
+    def _apply_pomodoro_tick(self, remaining_fmt: str, cycle: int, total: int):
         try:
-            self.gui.pomodoro_timer_var.set(self.pomodoro.get_remaining_formatted())
+            self.gui.pomodoro_timer_var.set(remaining_fmt)
             self.gui.pomodoro_cycle_var.set(f"{cycle}/{total}")
         except Exception:
             pass
 
     def _on_pomodoro_state_change(self, state, cycle, total):
+        # Hilo del temporizador: encolar comida a la UI y notificaciones.
+        label = self.pomodoro.get_state_label()
+        remaining_fmt = self.pomodoro.get_remaining_formatted()
+        self._post_ui(lambda: self._apply_pomodoro_state(label, cycle, total))
+
+        if state == PomodoroState.WORK:
+            self._notification_queue.put((f"Pomodoro: A trabajar! Ciclo {cycle}/{total}", False))
+        elif state == PomodoroState.BREAK:
+            self._notification_queue.put((f"Pomodoro: Descanso ({remaining_fmt})", False))
+        elif state == PomodoroState.LONG_BREAK:
+            self._notification_queue.put((f"Pomodoro: Descanso largo! ({remaining_fmt})", False))
+
+    def _apply_pomodoro_state(self, label: str, cycle: int, total: int):
         try:
-            label = self.pomodoro.get_state_label()
             self.gui.pomodoro_state_var.set(label)
             self.gui.pomodoro_cycle_var.set(f"{cycle}/{total}")
-            if state == PomodoroState.WORK:
-                self._notification_queue.put((f"Pomodoro: A trabajar! Ciclo {cycle}/{total}", False))
-            elif state == PomodoroState.BREAK:
-                self._notification_queue.put((f"Pomodoro: Descanso ({self.pomodoro.get_remaining_formatted()})", False))
-            elif state == PomodoroState.LONG_BREAK:
-                self._notification_queue.put((f"Pomodoro: Descanso largo! ({self.pomodoro.get_remaining_formatted()})", False))
         except Exception:
             pass
 
@@ -465,7 +675,10 @@ class ScreenTimeApp:
             frame = tk.Frame(overlay, bg="#000000")
             frame.pack(fill=tk.BOTH, expand=True)
 
-            tk.Label(frame, text="Hora de descansar!", font=("Segoe UI", 24, "bold"), bg="#000000", fg="#107C10").pack(pady=(80, 10))
+            tk.Label(
+                frame, text="Hora de descansar!", font=("Segoe UI", 24, "bold"),
+                bg="#000000", fg="#107C10",
+            ).pack(pady=(80, 10))
             tk.Label(
                 frame,
                 text="Llevas mucho tiempo frente a la pantalla.\nEstira las piernas, descansa la vista.",
@@ -473,7 +686,10 @@ class ScreenTimeApp:
             ).pack(pady=20)
 
             elapsed = self.logger.get_elapsed_formatted()
-            tk.Label(frame, text=f"Tiempo conectado: {elapsed}", font=("Segoe UI", 12), bg="#000000", fg="#ff6b35").pack()
+            tk.Label(
+                frame, text=f"Tiempo conectado: {elapsed}", font=("Segoe UI", 12),
+                bg="#000000", fg="#ff6b35",
+            ).pack()
 
             tk.Button(
                 frame, text="   Continuar   ",
@@ -497,7 +713,7 @@ class ScreenTimeApp:
         try:
             from tkinter import filedialog
 
-            data = self.logger._load_data()
+            data = self.logger.get_history()
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".csv",
                 filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
@@ -523,13 +739,36 @@ class ScreenTimeApp:
             _log(f"[Export] Error: {e}")
 
     def _on_autostart_toggle(self):
-        self.settings["auto_start"] = not self.settings["auto_start"]
-        save_settings(self.settings)
-        self._set_windows_autostart(self.settings["auto_start"])
+        """Alterna el inicio con Windows desde el icono del tray."""
+        self._set_autostart(not self.settings.get("auto_start", False))
 
-        estado = "activado" if self.settings["auto_start"] else "desactivado"
+    def _set_autostart(self, enable: bool):
+        self.settings["auto_start"] = bool(enable)
+        save_settings(self.settings)
+        self._set_windows_autostart(bool(enable))
+        self._post_ui(lambda: self.gui.set_autostart(bool(enable)))
+
+        estado = "activado" if enable else "desactivado"
         _log(f"[Accion] Inicio automatico {estado}.")
         self._notification_queue.put((f"Inicio automatico {estado}.", False))
+
+    def _on_minimized_toggle(self):
+        """Alterna el inicio minimizado desde el icono del tray."""
+        self._set_start_minimized(not self.settings.get("start_minimized", True))
+
+    def _set_start_minimized(self, enable: bool):
+        """Guarda si la ventana debe abrirse o no al iniciar la aplicacion."""
+        self.settings["start_minimized"] = bool(enable)
+        save_settings(self.settings)
+        self._post_ui(lambda: self.gui.set_start_minimized(bool(enable)))
+
+        msg = (
+            "Listo: la proxima vez arrancara minimizado (solo el icono del tray)."
+            if enable
+            else "Listo: la proxima vez se abrira la ventana al iniciar."
+        )
+        _log(f"[Accion] Inicio minimizado {'activado' if enable else 'desactivado'}.")
+        self._notification_queue.put((msg, False))
 
     def _set_windows_autostart(self, enable: bool):
         try:
@@ -561,6 +800,9 @@ class ScreenTimeApp:
         self.notifier.stop()
         self.pomodoro.stop()
         self.fullscreen_detector.stop()
+        self.shutdown.stop()
+        if self._cancel_pending_os_shutdown():
+            _log("[Apagado] Apagado pendiente cancelado al cerrar la aplicacion.")
         self.logger.save_session()
         self.settings["window_geometry"] = self.gui.get_geometry()
         save_settings(self.settings)
@@ -575,11 +817,19 @@ class ScreenTimeApp:
             pass
 
 
+_SINGLE_INSTANCE_MUTEX = None
+
+
 def check_single_instance():
     """Verifica que no haya otra instancia de la app ejecutandose."""
+    global _SINGLE_INSTANCE_MUTEX
+    error_already_exists = 183
     try:
-        mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "ScreenTimeNotifier_SingleInstance")
-        if ctypes.windll.kernel32.GetLastError() == 183:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        _SINGLE_INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, "ScreenTimeNotifier_SingleInstance")
+        if ctypes.get_last_error() == error_already_exists:
             _log("Ya hay una instancia ejecutandose.")
             ctypes.windll.user32.MessageBoxW(
                 0,

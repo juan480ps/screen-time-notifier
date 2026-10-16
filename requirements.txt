@@ -1,0 +1,5 @@
+pystray>=0.19.5
+Pillow>=10.0.0
+# pygame no publica ruedas para Python 3.14+, se usa su fork compatible pygame-ce
+pygame>=2.6.0; python_version < "3.14"
+pygame-ce>=2.5.3; python_version >= "3.14"

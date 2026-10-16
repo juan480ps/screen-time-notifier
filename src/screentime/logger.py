@@ -2,10 +2,10 @@
 
 import json
 import os
-from datetime import datetime, date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
-from screentime.config import HISTORY_FILE, DATA_DIR
+from screentime.config import DATA_DIR, HISTORY_FILE
 
 
 class UsageLogger:
@@ -26,9 +26,20 @@ class UsageLogger:
     def _load_data(self) -> dict:
         try:
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
         except (json.JSONDecodeError, IOError):
             return {"daily_sessions": {}, "total_usage_seconds": 0}
+
+        # Normaliza historiales antiguos o incompletos.
+        if not isinstance(data, dict):
+            return {"daily_sessions": {}, "total_usage_seconds": 0}
+        data.setdefault("daily_sessions", {})
+        data.setdefault("total_usage_seconds", 0)
+        return data
+
+    def get_history(self) -> dict:
+        """Devuelve el historial completo (uso público, p. ej. exportar)."""
+        return self._load_data()
 
     def _save_data(self, data: dict):
         try:
@@ -109,19 +120,20 @@ class UsageLogger:
     def get_today_stats(self) -> dict:
         data = self._load_data()
         today = date.today().isoformat()
+        current_s = int(self.get_elapsed_seconds())
 
         if today not in data["daily_sessions"]:
             return {
-                "total_seconds": 0,
+                "total_seconds": current_s,
                 "sessions_count": 0,
-                "current_session_seconds": int(self.get_elapsed_seconds()),
+                "current_session_seconds": current_s,
             }
 
         day_data = data["daily_sessions"][today]
         return {
-            "total_seconds": day_data["total_seconds"] + int(self.get_elapsed_seconds()),
+            "total_seconds": day_data["total_seconds"] + current_s,
             "sessions_count": len(day_data["sessions"]),
-            "current_session_seconds": int(self.get_elapsed_seconds()),
+            "current_session_seconds": current_s,
         }
 
     def get_week_stats(self) -> dict:
@@ -132,9 +144,12 @@ class UsageLogger:
         for i in range(7):
             day = (today - timedelta(days=i)).isoformat()
             if day in data["daily_sessions"]:
-                week_data[day] = data["daily_sessions"][day]["total_seconds"]
+                total = data["daily_sessions"][day]["total_seconds"]
             else:
-                week_data[day] = 0
+                total = 0
+            if i == 0:
+                total += int(self.get_elapsed_seconds())
+            week_data[day] = total
 
         return week_data
 

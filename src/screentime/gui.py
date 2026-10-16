@@ -1,32 +1,18 @@
 """Interfaz gráfica principal de la aplicación."""
 
 import tkinter as tk
-from tkinter import ttk, messagebox
-import threading
 from typing import Optional
 
-from screentime.config import get_app_name, get_app_version, ICON_PATH
-
-
-# ─── Colores del tema Xbox/Gaming ───────────────────────────────────────────
-COLORS = {
-    "bg_dark": "#0e0e0e",
-    "bg_panel": "#1a1a2e",
-    "bg_card": "#16213e",
-    "accent_green": "#107C10",
-    "accent_green_light": "#1db954",
-    "accent_blue": "#0f3460",
-    "accent_neon": "#00ff88",
-    "text_primary": "#e0e0e0",
-    "text_secondary": "#a0a0a0",
-    "text_warning": "#ff6b35",
-    "text_danger": "#ff4444",
-    "progress_bg": "#2a2a2a",
-    "progress_fill": "#107C10",
-    "progress_warning": "#ff6b35",
-    "progress_danger": "#ff4444",
-    "border": "#2a2a4a",
-}
+from screentime.config import ICON_PATH, get_app_name, get_app_version
+from screentime.shutdown import DEFAULT_POSTPONE_MINUTES
+from screentime.theme import (
+    COLORS,
+    SCROLL_MIN_STEP,
+    SCROLL_PIXELS_PER_NOTCH,
+    SHUTDOWN_MODE_KEYS,
+    SHUTDOWN_MODE_LABELS,
+    unpack_touchpad_delta,
+)
 
 
 class MainGUI:
@@ -61,9 +47,19 @@ class MainGUI:
         self._on_pomodoro_toggle = None
         self._on_game_mode_toggle = None
         self._on_screen_lock_toggle = None
+        self._on_screen_lock_hours_change = None
         self._on_daily_goal_change = None
+        self._on_shutdown_change = None
+        self._on_shutdown_now = None
+        self._on_shutdown_postpone = None
+        self._on_shutdown_cancel = None
+        self._on_autostart_toggle = None
+        self._on_start_minimized_toggle = None
+        self._suppress_callbacks = False
+        self._shutdown_emit_job = None
+        self._wheel_delta = 0.0
 
-    def create_window(self) -> tk.Tk:
+    def create_window(self, start_minimized: bool = False) -> tk.Tk:
         if self.root is not None:
             self.root.deiconify()
             self.root.lift()
@@ -71,6 +67,9 @@ class MainGUI:
             return self.root
 
         self.root = tk.Tk()
+        if start_minimized:
+            # Se oculta antes de dibujar nada para que no aparezca la ventana
+            self.root.withdraw()
 
         self.time_var = tk.StringVar(value="00:00:00")
         self.status_var = tk.StringVar(value="Activo")
@@ -91,6 +90,15 @@ class MainGUI:
         self.game_mode_enabled = tk.BooleanVar(value=False)
         self.screen_lock_enabled = tk.BooleanVar(value=False)
         self.daily_goal_hours_var = tk.StringVar(value="8")
+        self.shutdown_enabled = tk.BooleanVar(value=False)
+        self.auto_start_var = tk.BooleanVar(value=False)
+        self.start_minimized_var = tk.BooleanVar(value=True)
+        self.shutdown_mode_var = tk.StringVar(value="Hora fija")
+        self.shutdown_hour_var = tk.StringVar(value="23")
+        self.shutdown_minute_var = tk.StringVar(value="00")
+        self.shutdown_minutes_var = tk.StringVar(value="60")
+        self.shutdown_warn_var = tk.StringVar(value="5")
+        self.shutdown_status_var = tk.StringVar(value="Desactivado")
         self.root.title(f"{get_app_name()} v{get_app_version()}")
         self.root.minsize(400, 500)
         self.root.configure(bg=COLORS["bg_dark"])
@@ -99,8 +107,8 @@ class MainGUI:
 
         try:
             from PIL import Image, ImageTk
-            img = Image.open(ICON_PATH)
-            photo = ImageTk.PhotoImage(img)
+            with Image.open(ICON_PATH) as img:
+                photo = ImageTk.PhotoImage(img)
             self.root.iconphoto(True, photo)
             self._icon_photo = photo
         except Exception:
@@ -110,25 +118,31 @@ class MainGUI:
                 pass
 
         saved_geo = self.settings.get("window_geometry")
+        used_saved_geo = False
         if saved_geo:
             try:
                 self.root.geometry(saved_geo)
+                used_saved_geo = True
             except Exception:
-                self.root.geometry("480x820")
-                self._center_window()
-        else:
+                used_saved_geo = False
+
+        if not used_saved_geo:
             self.root.geometry("480x820")
-            self._center_window()
+            # Una ventana oculta reporta tamaño 1x1, así que no se puede centrar
+            if not start_minimized:
+                self._center_window()
 
         self._build_ui()
         self._start_update_loop()
-        self._visible = True
+        self._visible = not start_minimized
 
         return self.root
 
     def _build_ui(self):
         """Construye toda la interfaz de usuario con scroll."""
-        self._canvas = tk.Canvas(self.root, bg=COLORS["bg_dark"], highlightthickness=0)
+        self._canvas = tk.Canvas(
+            self.root, bg=COLORS["bg_dark"], highlightthickness=0, yscrollincrement=1,
+        )
         self._scrollbar = tk.Scrollbar(self.root, orient="vertical", command=self._canvas.yview)
         self._scroll_frame = tk.Frame(self._canvas, bg=COLORS["bg_dark"])
 
@@ -145,9 +159,23 @@ class MainGUI:
         self._canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event):
-            self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            # Rueda de ratón clásica (múltiplos de 120).
+            self._scroll_by(event.delta)
+
+        def _on_touchpad_scroll(event):
+            # Tk 9.0 entrega el gesto de dos dedos como <TouchpadScroll>
+            # (no como <MouseWheel>): se extrae el desplazamiento vertical.
+            _dx, dy = unpack_touchpad_delta(event.delta)
+            self._scroll_by(dy)
 
         self._canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        try:
+            self._canvas.bind_all("<TouchpadScroll>", _on_touchpad_scroll)
+        except tk.TclError:
+            # Tk < 9.0 no conoce <TouchpadScroll>; en esas versiones el scroll
+            # de trackpad llega como <MouseWheel> con deltas pequeños, que ya
+            # cubre el acumulador de _on_mousewheel.
+            pass
 
         content = self._scroll_frame
 
@@ -169,7 +197,10 @@ class MainGUI:
         ).pack()
 
         # ─── Timer principal ─────────────────────────────────────────────
-        timer_frame = tk.Frame(content, bg=COLORS["bg_panel"], highlightbackground=COLORS["border"], highlightthickness=1)
+        timer_frame = tk.Frame(
+            content, bg=COLORS["bg_panel"],
+            highlightbackground=COLORS["border"], highlightthickness=1,
+        )
         timer_frame.pack(fill=tk.X, padx=20, pady=(15, 10))
 
         tk.Label(
@@ -209,7 +240,10 @@ class MainGUI:
         self.progress_canvas.pack(fill=tk.X, pady=(4, 0))
 
         # ─── Estadísticas del día ────────────────────────────────────────
-        stats_frame = tk.Frame(content, bg=COLORS["bg_panel"], highlightbackground=COLORS["border"], highlightthickness=1)
+        stats_frame = tk.Frame(
+            content, bg=COLORS["bg_panel"],
+            highlightbackground=COLORS["border"], highlightthickness=1,
+        )
         stats_frame.pack(fill=tk.X, padx=20, pady=(10, 10))
 
         tk.Label(
@@ -223,21 +257,42 @@ class MainGUI:
 
         col1 = tk.Frame(grid, bg=COLORS["bg_card"], padx=10, pady=8)
         col1.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(0, 4))
-        tk.Label(col1, text="Total hoy", font=("Segoe UI", 8), fg=COLORS["text_secondary"], bg=COLORS["bg_card"]).pack()
-        tk.Label(col1, textvariable=self.today_total_var, font=("Segoe UI", 14, "bold"), fg=COLORS["accent_neon"], bg=COLORS["bg_card"]).pack()
+        tk.Label(
+            col1, text="Total hoy", font=("Segoe UI", 8),
+            fg=COLORS["text_secondary"], bg=COLORS["bg_card"],
+        ).pack()
+        tk.Label(
+            col1, textvariable=self.today_total_var, font=("Segoe UI", 14, "bold"),
+            fg=COLORS["accent_neon"], bg=COLORS["bg_card"],
+        ).pack()
 
         col2 = tk.Frame(grid, bg=COLORS["bg_card"], padx=10, pady=8)
         col2.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=2)
-        tk.Label(col2, text="Sesiones", font=("Segoe UI", 8), fg=COLORS["text_secondary"], bg=COLORS["bg_card"]).pack()
-        tk.Label(col2, textvariable=self.sessions_var, font=("Segoe UI", 14, "bold"), fg=COLORS["accent_green_light"], bg=COLORS["bg_card"]).pack()
+        tk.Label(
+            col2, text="Sesiones", font=("Segoe UI", 8),
+            fg=COLORS["text_secondary"], bg=COLORS["bg_card"],
+        ).pack()
+        tk.Label(
+            col2, textvariable=self.sessions_var, font=("Segoe UI", 14, "bold"),
+            fg=COLORS["accent_green_light"], bg=COLORS["bg_card"],
+        ).pack()
 
         col3 = tk.Frame(grid, bg=COLORS["bg_card"], padx=10, pady=8)
         col3.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=(4, 0))
-        tk.Label(col3, text="Actual", font=("Segoe UI", 8), fg=COLORS["text_secondary"], bg=COLORS["bg_card"]).pack()
-        tk.Label(col3, textvariable=self.session_var, font=("Segoe UI", 14, "bold"), fg=COLORS["accent_green"], bg=COLORS["bg_card"]).pack()
+        tk.Label(
+            col3, text="Actual", font=("Segoe UI", 8),
+            fg=COLORS["text_secondary"], bg=COLORS["bg_card"],
+        ).pack()
+        tk.Label(
+            col3, textvariable=self.session_var, font=("Segoe UI", 14, "bold"),
+            fg=COLORS["accent_green"], bg=COLORS["bg_card"],
+        ).pack()
 
         # ─── Configurar intervalo ────────────────────────────────────────
-        interval_frame = tk.Frame(content, bg=COLORS["bg_panel"], highlightbackground=COLORS["border"], highlightthickness=1)
+        interval_frame = tk.Frame(
+            content, bg=COLORS["bg_panel"],
+            highlightbackground=COLORS["border"], highlightthickness=1,
+        )
         interval_frame.pack(fill=tk.X, padx=20, pady=(0, 10))
 
         tk.Label(
@@ -309,7 +364,10 @@ class MainGUI:
         ).pack(side=tk.LEFT)
 
         # ─── Barra de progreso semanal ───────────────────────────────────
-        week_frame = tk.Frame(content, bg=COLORS["bg_panel"], highlightbackground=COLORS["border"], highlightthickness=1)
+        week_frame = tk.Frame(
+            content, bg=COLORS["bg_panel"],
+            highlightbackground=COLORS["border"], highlightthickness=1,
+        )
         week_frame.pack(fill=tk.X, padx=20, pady=(0, 10))
 
         tk.Label(
@@ -334,7 +392,10 @@ class MainGUI:
         ).pack(pady=(0, 6))
 
         # ── Meta Diaria ──────────────────────────────────────────────────
-        goal_frame = tk.Frame(features_frame, bg=COLORS["bg_panel"], highlightbackground=COLORS["border"], highlightthickness=1)
+        goal_frame = tk.Frame(
+            features_frame, bg=COLORS["bg_panel"],
+            highlightbackground=COLORS["border"], highlightthickness=1,
+        )
         goal_frame.pack(fill=tk.X, pady=(0, 6))
 
         goal_header = tk.Frame(goal_frame, bg=COLORS["bg_panel"])
@@ -367,7 +428,10 @@ class MainGUI:
         self.goal_canvas.pack(fill=tk.X, padx=10, pady=(0, 8))
 
         # ── Pomodoro ─────────────────────────────────────────────────────
-        pomo_frame = tk.Frame(features_frame, bg=COLORS["bg_panel"], highlightbackground=COLORS["border"], highlightthickness=1)
+        pomo_frame = tk.Frame(
+            features_frame, bg=COLORS["bg_panel"],
+            highlightbackground=COLORS["border"], highlightthickness=1,
+        )
         pomo_frame.pack(fill=tk.X, pady=(0, 6))
 
         pomo_header = tk.Frame(pomo_frame, bg=COLORS["bg_panel"])
@@ -426,7 +490,10 @@ class MainGUI:
         self.pomo_stop_btn.pack(side=tk.LEFT, padx=2)
 
         # ── Modo Juego ──────────────────────────────────────────────────
-        game_frame = tk.Frame(features_frame, bg=COLORS["bg_panel"], highlightbackground=COLORS["border"], highlightthickness=1)
+        game_frame = tk.Frame(
+            features_frame, bg=COLORS["bg_panel"],
+            highlightbackground=COLORS["border"], highlightthickness=1,
+        )
         game_frame.pack(fill=tk.X, pady=(0, 6))
 
         game_row = tk.Frame(game_frame, bg=COLORS["bg_panel"])
@@ -445,7 +512,10 @@ class MainGUI:
         self.game_status_dot.pack(side=tk.RIGHT)
 
         # ── Bloqueo de pantalla ─────────────────────────────────────────
-        lock_frame = tk.Frame(features_frame, bg=COLORS["bg_panel"], highlightbackground=COLORS["border"], highlightthickness=1)
+        lock_frame = tk.Frame(
+            features_frame, bg=COLORS["bg_panel"],
+            highlightbackground=COLORS["border"], highlightthickness=1,
+        )
         lock_frame.pack(fill=tk.X, pady=(0, 6))
 
         lock_row = tk.Frame(lock_frame, bg=COLORS["bg_panel"])
@@ -476,6 +546,177 @@ class MainGUI:
         tk.Label(lock_hours_row, text="horas", font=("Segoe UI", 8),
                  fg=COLORS["text_secondary"], bg=COLORS["bg_panel"]).pack(side=tk.LEFT)
 
+        self.lock_hours_var.trace_add("write", self._on_lock_hours_change)
+
+        # ── Apagado automático ─────────────────────────────────────
+        shutdown_frame = tk.Frame(
+            features_frame, bg=COLORS["bg_panel"],
+            highlightbackground=COLORS["border"], highlightthickness=1,
+        )
+        shutdown_frame.pack(fill=tk.X, pady=(0, 6))
+
+        shutdown_header = tk.Frame(shutdown_frame, bg=COLORS["bg_panel"])
+        shutdown_header.pack(fill=tk.X, padx=10, pady=(8, 4))
+
+        tk.Checkbutton(
+            shutdown_header, text="Apagado automático", variable=self.shutdown_enabled,
+            font=("Segoe UI", 9, "bold"), fg=COLORS["text_primary"], bg=COLORS["bg_panel"],
+            selectcolor=COLORS["bg_card"], activebackground=COLORS["bg_panel"],
+            command=self._on_shutdown_toggle_click,
+        ).pack(side=tk.LEFT)
+
+        self.shutdown_status_label = tk.Label(
+            shutdown_header, textvariable=self.shutdown_status_var,
+            font=("Segoe UI", 8), fg=COLORS["accent_green_light"], bg=COLORS["bg_panel"],
+        )
+        self.shutdown_status_label.pack(side=tk.RIGHT)
+
+        self.shutdown_mode_row = tk.Frame(shutdown_frame, bg=COLORS["bg_panel"])
+        self.shutdown_mode_row.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        tk.Label(self.shutdown_mode_row, text="Modo:", font=("Segoe UI", 8),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_panel"]).pack(side=tk.LEFT)
+
+        self.shutdown_mode_menu = tk.OptionMenu(
+            self.shutdown_mode_row, self.shutdown_mode_var, *SHUTDOWN_MODE_KEYS.keys(),
+        )
+        self.shutdown_mode_menu.configure(
+            font=("Segoe UI", 8),
+            bg=COLORS["bg_card"], fg=COLORS["text_primary"],
+            activebackground=COLORS["accent_green"], activeforeground="white",
+            highlightthickness=0, width=12,
+        )
+        self.shutdown_mode_menu["menu"].configure(
+            bg=COLORS["bg_card"], fg=COLORS["text_primary"],
+            activebackground=COLORS["accent_green"],
+        )
+        self.shutdown_mode_menu.pack(side=tk.LEFT, padx=(4, 0))
+
+        self.shutdown_time_row = tk.Frame(shutdown_frame, bg=COLORS["bg_panel"])
+        self.shutdown_time_row.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        tk.Label(self.shutdown_time_row, text="Apagar a las", font=("Segoe UI", 8),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_panel"]).pack(side=tk.LEFT)
+
+        self.shutdown_hour_spinner = tk.Spinbox(
+            self.shutdown_time_row, from_=0, to=23, width=3, format="%02.0f",
+            font=("Segoe UI", 10), bg=COLORS["bg_card"], fg=COLORS["accent_neon"],
+            buttonbackground=COLORS["accent_green"], highlightthickness=0,
+            textvariable=self.shutdown_hour_var,
+        )
+        self.shutdown_hour_spinner.pack(side=tk.LEFT, padx=(4, 2))
+
+        tk.Label(self.shutdown_time_row, text=":", font=("Segoe UI", 10, "bold"),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_panel"]).pack(side=tk.LEFT)
+
+        self.shutdown_minute_spinner = tk.Spinbox(
+            self.shutdown_time_row, from_=0, to=59, width=3, format="%02.0f",
+            font=("Segoe UI", 10), bg=COLORS["bg_card"], fg=COLORS["accent_neon"],
+            buttonbackground=COLORS["accent_green"], highlightthickness=0,
+            textvariable=self.shutdown_minute_var,
+        )
+        self.shutdown_minute_spinner.pack(side=tk.LEFT, padx=(2, 4))
+
+        tk.Label(self.shutdown_time_row, text="(cada día)", font=("Segoe UI", 8),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_panel"]).pack(side=tk.LEFT)
+
+        self.shutdown_countdown_row = tk.Frame(shutdown_frame, bg=COLORS["bg_panel"])
+        self.shutdown_countdown_row.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        tk.Label(self.shutdown_countdown_row, text="Apagar en", font=("Segoe UI", 8),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_panel"]).pack(side=tk.LEFT)
+
+        self.shutdown_minutes_spinner = tk.Spinbox(
+            self.shutdown_countdown_row, from_=1, to=720, width=4,
+            font=("Segoe UI", 10), bg=COLORS["bg_card"], fg=COLORS["accent_neon"],
+            buttonbackground=COLORS["accent_green"], highlightthickness=0,
+            textvariable=self.shutdown_minutes_var,
+        )
+        self.shutdown_minutes_spinner.pack(side=tk.LEFT, padx=(4, 4))
+
+        tk.Label(self.shutdown_countdown_row, text="minutos (una sola vez)", font=("Segoe UI", 8),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_panel"]).pack(side=tk.LEFT)
+
+        self.shutdown_warn_row = tk.Frame(shutdown_frame, bg=COLORS["bg_panel"])
+        self.shutdown_warn_row.pack(fill=tk.X, padx=10, pady=(0, 6))
+
+        tk.Label(self.shutdown_warn_row, text="Avisar", font=("Segoe UI", 8),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_panel"]).pack(side=tk.LEFT)
+
+        self.shutdown_warn_spinner = tk.Spinbox(
+            self.shutdown_warn_row, from_=0, to=30, width=3,
+            font=("Segoe UI", 10), bg=COLORS["bg_card"], fg=COLORS["accent_neon"],
+            buttonbackground=COLORS["accent_green"], highlightthickness=0,
+            textvariable=self.shutdown_warn_var,
+        )
+        self.shutdown_warn_spinner.pack(side=tk.LEFT, padx=(4, 4))
+
+        tk.Label(self.shutdown_warn_row, text="minutos antes (0 = sin aviso)", font=("Segoe UI", 8),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_panel"]).pack(side=tk.LEFT)
+
+        shutdown_actions = tk.Frame(shutdown_frame, bg=COLORS["bg_panel"])
+        shutdown_actions.pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        self.shutdown_now_btn = tk.Button(
+            shutdown_actions, text="⏻ Apagar ahora (60 s)", font=("Segoe UI", 8),
+            bg=COLORS["bg_card"], fg=COLORS["text_primary"],
+            command=self._on_shutdown_now_click,
+        )
+        self.shutdown_now_btn.pack(side=tk.LEFT)
+
+        self.shutdown_postpone_btn = tk.Button(
+            shutdown_actions, text=f"⏱ Posponer {DEFAULT_POSTPONE_MINUTES} min",
+            font=("Segoe UI", 8),
+            bg=COLORS["bg_card"], fg=COLORS["accent_neon"],
+            command=self._on_shutdown_postpone_click,
+        )
+        self.shutdown_postpone_btn.pack(side=tk.LEFT, padx=(6, 0))
+
+        self.shutdown_cancel_btn = tk.Button(
+            shutdown_actions, text="✖ Cancelar apagado", font=("Segoe UI", 8),
+            bg=COLORS["bg_card"], fg=COLORS["text_warning"],
+            command=self._on_shutdown_cancel_click,
+        )
+        self.shutdown_cancel_btn.pack(side=tk.RIGHT)
+
+        self.shutdown_mode_var.trace_add("write", self._on_shutdown_changed)
+        self.shutdown_hour_var.trace_add("write", self._on_shutdown_changed)
+        self.shutdown_minute_var.trace_add("write", self._on_shutdown_changed)
+        self.shutdown_minutes_var.trace_add("write", self._on_shutdown_changed)
+        self.shutdown_warn_var.trace_add("write", self._on_shutdown_changed)
+
+        # ── Al iniciar ──────────────────────────────────────────────────
+        start_frame = tk.Frame(
+            features_frame, bg=COLORS["bg_panel"],
+            highlightbackground=COLORS["border"], highlightthickness=1,
+        )
+        start_frame.pack(fill=tk.X, pady=(0, 6))
+
+        tk.Label(
+            start_frame, text="AL INICIAR", font=("Segoe UI", 8, "bold"),
+            fg=COLORS["text_secondary"], bg=COLORS["bg_panel"],
+        ).pack(anchor="w", padx=10, pady=(8, 2))
+
+        tk.Checkbutton(
+            start_frame, text="Iniciar con Windows", variable=self.auto_start_var,
+            font=("Segoe UI", 9), fg=COLORS["text_primary"], bg=COLORS["bg_panel"],
+            selectcolor=COLORS["bg_card"], activebackground=COLORS["bg_panel"],
+            command=self._on_autostart_toggle_click,
+        ).pack(anchor="w", padx=10)
+
+        tk.Checkbutton(
+            start_frame, text="Iniciar minimizado (solo el icono del tray)", variable=self.start_minimized_var,
+            font=("Segoe UI", 9), fg=COLORS["text_primary"], bg=COLORS["bg_panel"],
+            selectcolor=COLORS["bg_card"], activebackground=COLORS["bg_panel"],
+            command=self._on_start_minimized_toggle_click,
+        ).pack(anchor="w", padx=10)
+
+        tk.Label(
+            start_frame, text="Minimizado: la ventana no se abre hasta que hagas clic en el icono.",
+            font=("Segoe UI", 7), fg=COLORS["text_secondary"], bg=COLORS["bg_panel"],
+            wraplength=400, justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 8))
+
         # ─── Botón exportar ──────────────────────────────────────────────
         export_frame = tk.Frame(content, bg=COLORS["bg_dark"])
         export_frame.pack(fill=tk.X, padx=20, pady=(0, 5))
@@ -496,6 +737,8 @@ class MainGUI:
             fg=COLORS["text_secondary"], bg=COLORS["bg_dark"],
         ).pack()
 
+        self._update_shutdown_widgets()
+
     def _on_pomodoro_start_click(self):
         if self._on_pomodoro_start:
             self._on_pomodoro_start()
@@ -511,6 +754,23 @@ class MainGUI:
     def _on_export_click(self):
         if self._on_export_csv:
             self._on_export_csv()
+
+    def _scroll_by(self, delta: int):
+        """Desplaza el canvas acumulando el delta y traduciéndolo a píxeles.
+
+        Así funciona tanto la rueda (múltiplos de 120) como el trackpad, que
+        envía deltas pequeños y no se puede redondear a 0.
+        """
+        if not delta:
+            return
+        self._wheel_delta += (delta / 120.0) * SCROLL_PIXELS_PER_NOTCH
+        if abs(self._wheel_delta) < SCROLL_MIN_STEP:
+            return
+        pixels = int(self._wheel_delta)
+        if pixels == 0:
+            pixels = SCROLL_MIN_STEP if self._wheel_delta > 0 else -SCROLL_MIN_STEP
+        self._wheel_delta -= pixels
+        self._canvas.yview_scroll(-pixels, "units")
 
     def _on_daily_goal_toggle_click(self):
         if self._on_daily_goal_toggle:
@@ -538,13 +798,141 @@ class MainGUI:
         if self._on_screen_lock_toggle:
             self._on_screen_lock_toggle(self.screen_lock_enabled.get())
 
+    def _on_lock_hours_change(self, *_args):
+        if self._suppress_callbacks:
+            return
+        try:
+            val = int(self.lock_hours_var.get())
+        except (ValueError, tk.TclError):
+            return
+        val = max(1, min(12, val))
+        if self._on_screen_lock_hours_change:
+            self._on_screen_lock_hours_change(val)
+
+    # ─── Apagado automático e inicio ─────────────────────────────────────
+
+    def _on_shutdown_toggle_click(self):
+        # Activar/desactivar se aplica al instante
+        self._update_shutdown_widgets()
+        self._cancel_shutdown_emit()
+        self._emit_shutdown_change()
+
+    def _on_shutdown_changed(self, *_args):
+        """Cambios en los controles: se espera a que el usuario termine.
+
+        Sin esta espera, escribir '30' en el Spinbox dispararía un aviso por
+        cada dígito (con su notificación y su sonido).
+        """
+        if self._suppress_callbacks:
+            return
+        self._update_shutdown_widgets()
+        if not self.root:
+            self._emit_shutdown_change()
+            return
+        self._cancel_shutdown_emit()
+        self._shutdown_emit_job = self.root.after(600, self._emit_shutdown_change)
+
+    def _cancel_shutdown_emit(self):
+        if self._shutdown_emit_job and self.root:
+            try:
+                self.root.after_cancel(self._shutdown_emit_job)
+            except (ValueError, tk.TclError):
+                pass
+        self._shutdown_emit_job = None
+
+    def _emit_shutdown_change(self):
+        self._shutdown_emit_job = None
+        if self._on_shutdown_change:
+            self._on_shutdown_change(self._collect_shutdown_config())
+
+    def _collect_shutdown_config(self) -> dict:
+        """Lee los controles y los normaliza a valores válidos."""
+
+        def _int(var, default: int, low: int, high: int) -> int:
+            try:
+                return max(low, min(high, int(var.get())))
+            except (ValueError, tk.TclError):
+                return default
+
+        hour = _int(self.shutdown_hour_var, 23, 0, 23)
+        minute = _int(self.shutdown_minute_var, 0, 0, 59)
+        return {
+            "enabled": bool(self.shutdown_enabled.get()),
+            "mode": SHUTDOWN_MODE_KEYS.get(self.shutdown_mode_var.get(), "hora"),
+            "time": f"{hour:02d}:{minute:02d}",
+            "minutes": _int(self.shutdown_minutes_var, 60, 1, 720),
+            "warn_minutes": _int(self.shutdown_warn_var, 5, 0, 30),
+        }
+
+    def _update_shutdown_widgets(self):
+        """Habilita solo los controles del modo activo."""
+        if not hasattr(self, "shutdown_mode_menu"):
+            return
+        enabled = bool(self.shutdown_enabled.get())
+        is_countdown = SHUTDOWN_MODE_KEYS.get(self.shutdown_mode_var.get(), "hora") == "temporizador"
+
+        self.shutdown_mode_menu.configure(state="normal" if enabled else "disabled")
+        self.shutdown_warn_spinner.configure(state="normal" if enabled else "disabled")
+        self.shutdown_postpone_btn.configure(state="normal" if enabled else "disabled")
+        self.shutdown_hour_spinner.configure(state="normal" if enabled and not is_countdown else "disabled")
+        self.shutdown_minute_spinner.configure(state="normal" if enabled and not is_countdown else "disabled")
+        self.shutdown_minutes_spinner.configure(state="normal" if enabled and is_countdown else "disabled")
+
+    def _on_shutdown_now_click(self):
+        if self._on_shutdown_now:
+            self._on_shutdown_now()
+
+    def _on_shutdown_postpone_click(self):
+        if self._on_shutdown_postpone:
+            self._on_shutdown_postpone()
+
+    def _on_shutdown_cancel_click(self):
+        if self._on_shutdown_cancel:
+            self._on_shutdown_cancel()
+
+    def _on_autostart_toggle_click(self):
+        if self._on_autostart_toggle:
+            self._on_autostart_toggle(self.auto_start_var.get())
+
+    def _on_start_minimized_toggle_click(self):
+        if self._on_start_minimized_toggle:
+            self._on_start_minimized_toggle(self.start_minimized_var.get())
+
+    def set_shutdown_status(self, text: str):
+        """Actualiza la etiqueta de estado del apagado programado."""
+        self.shutdown_status_var.set(text)
+
+    def set_shutdown_enabled(self, enabled: bool):
+        self.shutdown_enabled.set(bool(enabled))
+        self._update_shutdown_widgets()
+
+    def set_autostart(self, enabled: bool):
+        self.auto_start_var.set(bool(enabled))
+
+    def set_start_minimized(self, enabled: bool):
+        self.start_minimized_var.set(bool(enabled))
+
     def set_toggles_from_settings(self, settings: dict):
-        self.daily_goal_enabled.set(settings.get("daily_goal_enabled", False))
-        self.pomodoro_enabled.set(settings.get("pomodoro_enabled", False))
-        self.game_mode_enabled.set(settings.get("game_mode_enabled", False))
-        self.screen_lock_enabled.set(settings.get("screen_lock_enabled", False))
-        self.daily_goal_hours_var.set(str(settings.get("daily_goal_hours", 8)))
-        self.lock_hours_var.set(str(settings.get("screen_lock_hours", 4)))
+        self._suppress_callbacks = True
+        try:
+            self.daily_goal_enabled.set(settings.get("daily_goal_enabled", False))
+            self.pomodoro_enabled.set(settings.get("pomodoro_enabled", False))
+            self.game_mode_enabled.set(settings.get("game_mode_enabled", False))
+            self.screen_lock_enabled.set(settings.get("screen_lock_enabled", False))
+            self.daily_goal_hours_var.set(str(settings.get("daily_goal_hours", 8)))
+            self.lock_hours_var.set(str(settings.get("screen_lock_hours", 4)))
+            self.shutdown_enabled.set(settings.get("shutdown_enabled", False))
+            self.shutdown_mode_var.set(SHUTDOWN_MODE_LABELS.get(settings.get("shutdown_mode", "hora"), "Hora fija"))
+            hour, _, minute = str(settings.get("shutdown_time", "23:00")).partition(":")
+            self.shutdown_hour_var.set(hour or "23")
+            self.shutdown_minute_var.set(minute or "00")
+            self.shutdown_minutes_var.set(str(settings.get("shutdown_minutes", 60)))
+            self.shutdown_warn_var.set(str(settings.get("shutdown_warn_minutes", 5)))
+            self.auto_start_var.set(settings.get("auto_start", False))
+            self.start_minimized_var.set(settings.get("start_minimized", True))
+        finally:
+            self._suppress_callbacks = False
+        self._update_shutdown_widgets()
 
     def _start_update_loop(self):
         try:
@@ -584,7 +972,14 @@ class MainGUI:
         if w <= 1:
             return
 
-        max_seconds = 14400
+        # La barra mide la sesión actual contra el límite vigente: el bloqueo
+        # de pantalla si está activo, o la meta diaria como referencia si no.
+        if self.settings.get("screen_lock_enabled", False):
+            reference_hours = self.settings.get("screen_lock_hours", 4)
+        else:
+            reference_hours = self.settings.get("daily_goal_hours", 8)
+        reference_hours = max(1, reference_hours)
+        max_seconds = reference_hours * 3600
         progress = min(current_seconds / max_seconds, 1.0)
         fill_width = int(w * progress)
 
@@ -607,10 +1002,10 @@ class MainGUI:
                 self.progress_canvas.create_rectangle(i, 2, i + 2, h - 2, fill=c, outline="")
 
         pct = int(progress * 100)
-        goal_h = self._daily_goal_hours if hasattr(self, "_daily_goal_hours") else 8
+        formatted_current = self.logger.format_seconds(current_seconds)
         self.progress_canvas.create_text(
             w // 2, h // 2,
-            text=f"{pct}% — Meta: {goal_h}h",
+            text=f"{pct}% de sesión ({formatted_current} / {reference_hours}h)",
             fill=COLORS["text_primary"],
             font=("Segoe UI", 8, "bold"),
         )
@@ -767,6 +1162,7 @@ class MainGUI:
             pass
 
     def destroy(self):
+        self._cancel_shutdown_emit()
         if self._update_job and self.root:
             self.root.after_cancel(self._update_job)
         if self.root:
@@ -777,127 +1173,3 @@ class MainGUI:
     @property
     def is_visible(self) -> bool:
         return self._visible
-
-
-class IntervalDialog:
-    """Diálogo para configurar el intervalo de notificaciones."""
-
-    def __init__(self, parent, current_interval_seconds: int):
-        self.result = None
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title("Configurar intervalo")
-        self.dialog.geometry("320x240")
-        self.dialog.configure(bg=COLORS["bg_dark"])
-        self.dialog.resizable(False, False)
-        self.dialog.transient(parent)
-        self.dialog.grab_set()
-
-        self.dialog.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() // 2) - 160
-        y = parent.winfo_y() + (parent.winfo_height() // 2) - 120
-        self.dialog.geometry(f"+{x}+{y}")
-
-        tk.Label(
-            self.dialog, text="Intervalo de notificación",
-            font=("Segoe UI", 11, "bold"),
-            fg=COLORS["text_primary"], bg=COLORS["bg_dark"],
-        ).pack(pady=(15, 5))
-
-        tk.Label(
-            self.dialog, text="Cada cuánto recibir aviso:",
-            font=("Segoe UI", 9),
-            fg=COLORS["text_secondary"], bg=COLORS["bg_dark"],
-        ).pack()
-
-        input_frame = tk.Frame(self.dialog, bg=COLORS["bg_dark"])
-        input_frame.pack(pady=10)
-
-        self.spinner = tk.Spinbox(
-            input_frame, from_=1, to=999, increment=1, width=6,
-            font=("Segoe UI", 13),
-            bg=COLORS["bg_card"], fg=COLORS["accent_neon"],
-            buttonbackground=COLORS["accent_green"], highlightthickness=0,
-        )
-        self.spinner.pack(side=tk.LEFT, padx=(0, 8))
-
-        if current_interval_seconds % 3600 == 0 and current_interval_seconds >= 3600:
-            default_unit = "Horas"
-            default_val = current_interval_seconds // 3600
-        elif current_interval_seconds % 60 == 0 and current_interval_seconds >= 60:
-            default_unit = "Minutos"
-            default_val = current_interval_seconds // 60
-        else:
-            default_unit = "Segundos"
-            default_val = current_interval_seconds
-
-        self.unit_var = tk.StringVar(value=default_unit)
-        self.unit_menu = tk.OptionMenu(
-            input_frame, self.unit_var,
-            "Segundos", "Minutos", "Horas",
-        )
-        self.unit_menu.configure(
-            font=("Segoe UI", 9),
-            bg=COLORS["bg_card"], fg=COLORS["text_primary"],
-            activebackground=COLORS["accent_green"], activeforeground="white",
-            highlightthickness=0, width=8,
-        )
-        self.unit_menu["menu"].configure(
-            bg=COLORS["bg_card"], fg=COLORS["text_primary"],
-            activebackground=COLORS["accent_green"],
-        )
-        self.unit_menu.pack(side=tk.LEFT)
-
-        self.spinner.delete(0, tk.END)
-        self.spinner.insert(0, str(default_val))
-
-        self.unit_var.trace_add("write", self._on_unit_change)
-
-        btn_frame = tk.Frame(self.dialog, bg=COLORS["bg_dark"])
-        btn_frame.pack(pady=10)
-
-        tk.Button(
-            btn_frame, text="Aceptar",
-            font=("Segoe UI", 9, "bold"),
-            bg=COLORS["accent_green"], fg="white",
-            width=10, command=self._on_accept,
-        ).pack(side=tk.LEFT, padx=5)
-
-        tk.Button(
-            btn_frame, text="Cancelar",
-            font=("Segoe UI", 9),
-            bg=COLORS["bg_card"], fg=COLORS["text_primary"],
-            width=10, command=self._on_cancel,
-        ).pack(side=tk.LEFT, padx=5)
-
-    def _on_unit_change(self, *_args):
-        unit = self.unit_var.get()
-        self.spinner.config(from_=1)
-        if unit == "Segundos":
-            self.spinner.config(to=59)
-        elif unit == "Minutos":
-            self.spinner.config(to=120)
-        elif unit == "Horas":
-            self.spinner.config(to=12)
-
-    def _on_accept(self):
-        try:
-            val = int(self.spinner.get())
-            if val < 1:
-                return
-            unit = self.unit_var.get()
-            if unit == "Segundos":
-                self.result = val
-            elif unit == "Minutos":
-                self.result = val * 60
-            elif unit == "Horas":
-                self.result = val * 3600
-            self.dialog.destroy()
-        except ValueError:
-            pass
-
-    def _on_cancel(self):
-        self.dialog.destroy()
-
-    def show(self):
-        self.dialog.wait_window()
-        return self.result

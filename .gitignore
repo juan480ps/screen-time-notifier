@@ -30,3 +30,6 @@ Desktop.ini
 # Project
 data/
 *.log
+
+# Tooling
+.freebuff/

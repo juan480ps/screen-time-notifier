@@ -2,8 +2,8 @@
 
 import threading
 import time
-from typing import Optional, Callable
 from enum import Enum
+from typing import Callable, Optional
 
 
 class PomodoroState(Enum):

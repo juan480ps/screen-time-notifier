@@ -2,14 +2,15 @@
 
 import json
 import os
-import sys
 import subprocess
+import sys
 import tempfile
-import urllib.request
 import urllib.error
+import urllib.request
 from typing import Optional
 
 from screentime import __version__
+from screentime.filelog import append_log
 
 GITHUB_REPO = "juan480ps/screen-time-notifier"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -35,13 +36,7 @@ def _parse_version(v: str) -> tuple:
 
 
 def _log(msg: str):
-    try:
-        from screentime.config import DATA_DIR
-        log_path = os.path.join(DATA_DIR, "app.log")
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"{msg}\n")
-    except Exception:
-        pass
+    append_log(msg)
 
 
 def check_for_update() -> Optional[dict]:
@@ -59,7 +54,7 @@ def check_for_update() -> Optional[dict]:
         local_ver = _parse_version(__version__)
 
         if remote_ver <= local_ver:
-            _log(f"[Update] Ya esta actualizado.")
+            _log("[Update] Ya esta actualizado.")
             return True
 
         exe_asset = None
@@ -113,6 +108,11 @@ del "%~f0"
 
 
 def download_and_update(info: dict, on_progress=None) -> bool:
+    if not getattr(sys, "frozen", False):
+        # Ejecutando desde el codigo fuente: reemplazar sys.argv[0] corromperia
+        # el repositorio. La auto-actualizacion solo aplica al ejecutable.
+        _log("[Update] La actualizacion automatica solo esta disponible en el ejecutable (.exe).")
+        return False
     try:
         exe_dir = _get_exe_dir()
         new_exe_path = os.path.join(exe_dir, f"{EXE_NAME}.new")

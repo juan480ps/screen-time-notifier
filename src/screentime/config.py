@@ -47,6 +47,12 @@ DEFAULT_SETTINGS = {
     "screen_lock_enabled": False,
     "screen_lock_hours": 4,
     "game_mode_enabled": False,
+    "shutdown_enabled": False,
+    "shutdown_mode": "hora",
+    "shutdown_time": "23:00",
+    "shutdown_minutes": 60,
+    "shutdown_warn_minutes": 5,
+    "start_minimized": True,
     "window_geometry": None,
 }
 
