@@ -125,7 +125,7 @@ Todas las opciones son configurables desde la ventana principal:
 - **Meta diaria** — Horas maximas por dia con barra de progreso.
 - **Pomodoro** — Minutos de trabajo/descanso y ciclos.
 - **Modo juego** — Pausa automatica en fullscreen.
-- **Bloqueo** — Horas antes de mostrar overlay de descanso.
+- **Bloqueo** — Minutos u horas antes de mostrar el overlay de descanso.
 - **Apagado automatico** — Hora fija diaria o cuenta atras, y minutos de aviso previo.
 - **Inicio** — Arrancar con Windows y arrancar minimizado.
 
@@ -136,7 +136,7 @@ Las configuraciones se guardan en `%LOCALAPPDATA%\Screen Time Notifier\settings.
 En la tarjeta **APAGADO AUTOMATICO** de la ventana principal:
 
 - **Hora fija** — Se repite todos los dias a la hora indicada. Si la hora ya paso, se programa para el dia siguiente.
-- **Cuenta atras** — Apaga una sola vez, X minutos despues de activarlo (hasta 720).
+- **Cuenta atras** — Apaga una sola vez, X minutos u horas despues de activarlo (hasta 720 min).
 - **Avisar** — Notificacion con sonido N minutos antes (0 = sin aviso previo).
 - La **cuenta atras se muestra en vivo**: la etiqueta de estado de la ventana y el titulo del icono del tray se actualizan cada segundo con el tiempo restante (por ejemplo `Apagado en 29m 41s`).
 - **Posponer 10 min** (boton de la ventana y opcion del tray) retrasa el apagado pendiente sin desactivarlo; el aviso previo vuelve a armarse si aun falta mas que el umbral.

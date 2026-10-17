@@ -1,24 +1,60 @@
-"""Tema visual, colores y utilidades de scroll compartidas por la UI."""
+"""Design tokens: colores, tipografía, espaciado y utilidades de scroll."""
 
-# ─── Colores del tema Xbox/Gaming ───────────────────────────────────────────
+# ─── Paleta (tema oscuro moderno) ───────────────────────────────────────────
 COLORS = {
-    "bg_dark": "#0e0e0e",
-    "bg_panel": "#1a1a2e",
-    "bg_card": "#16213e",
-    "accent_green": "#107C10",
-    "accent_green_light": "#1db954",
-    "accent_blue": "#0f3460",
-    "accent_neon": "#00ff88",
-    "text_primary": "#e0e0e0",
-    "text_secondary": "#a0a0a0",
-    "text_warning": "#ff6b35",
-    "text_danger": "#ff4444",
-    "progress_bg": "#2a2a2a",
-    "progress_fill": "#107C10",
-    "progress_warning": "#ff6b35",
-    "progress_danger": "#ff4444",
-    "border": "#2a2a4a",
+    # Superficies
+    "bg_dark": "#0B0F14",
+    "bg_panel": "#141A22",
+    "bg_card": "#1A222D",
+    "surface": "#151B24",
+    "surface_2": "#1E2733",
+    "surface_3": "#27303D",
+    "border": "#2A3543",
+    "border_soft": "#212B37",
+    # Acentos
+    "accent_green": "#22C55E",
+    "accent_green_light": "#4ADE80",
+    "accent_neon": "#34D399",
+    "accent_blue": "#0EA5E9",
+    "accent_cyan": "#06B6D4",
+    "accent": "#22C55E",
+    # Texto
+    "text_primary": "#E6EDF3",
+    "text_secondary": "#93A1B0",
+    "text_muted": "#5C6B7A",
+    "text_warning": "#F59E0B",
+    "text_danger": "#F85149",
+    "on_accent": "#04140A",
+    # Progreso / estados
+    "progress_bg": "#27303D",
+    "progress_fill": "#22C55E",
+    "progress_warning": "#F59E0B",
+    "progress_danger": "#F85149",
+    "track_off": "#39434F",
+    "success": "#22C55E",
+    "warning": "#F59E0B",
+    "danger": "#F85149",
 }
+
+FONT_FAMILY = "Segoe UI"
+MONO_FAMILY = "Cascadia Mono"
+
+FONTS = {
+    "title": (FONT_FAMILY, 18, "bold"),
+    "subtitle": (FONT_FAMILY, 9),
+    "section": (FONT_FAMILY, 10, "bold"),
+    "card_title": (FONT_FAMILY, 11, "bold"),
+    "body": (FONT_FAMILY, 10),
+    "body_bold": (FONT_FAMILY, 10, "bold"),
+    "small": (FONT_FAMILY, 9),
+    "tiny": (FONT_FAMILY, 8),
+    "stat": (FONT_FAMILY, 15, "bold"),
+    "clock": (MONO_FAMILY, 34, "bold"),
+    "clock_sm": (MONO_FAMILY, 15, "bold"),
+}
+
+SPACING = {"xs": 4, "sm": 6, "md": 10, "lg": 14, "xl": 20}
+RADIUS = 14
 
 # ─── Scroll con rueda / trackpad ─────────────────────────────────────────────
 SCROLL_PIXELS_PER_NOTCH = 50

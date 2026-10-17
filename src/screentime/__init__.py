@@ -1,4 +1,4 @@
 """Screen Time Notifier - Monitor de tiempo en pantalla para Windows."""
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 __app_name__ = "Screen Time Notifier"

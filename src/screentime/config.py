@@ -45,7 +45,7 @@ DEFAULT_SETTINGS = {
     "pomodoro_long_break_minutes": 15,
     "pomodoro_cycles": 4,
     "screen_lock_enabled": False,
-    "screen_lock_hours": 4,
+    "screen_lock_minutes": 240,
     "game_mode_enabled": False,
     "shutdown_enabled": False,
     "shutdown_mode": "hora",
@@ -63,6 +63,9 @@ def load_settings() -> dict:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
+            # Migración: versiones previas guardaban screen_lock_hours.
+            if "screen_lock_minutes" not in saved and "screen_lock_hours" in saved:
+                saved["screen_lock_minutes"] = int(saved["screen_lock_hours"]) * 60
             return {**DEFAULT_SETTINGS, **saved}
         except (json.JSONDecodeError, IOError):
             return DEFAULT_SETTINGS.copy()

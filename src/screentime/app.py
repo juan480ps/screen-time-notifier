@@ -29,6 +29,7 @@ from screentime.shutdown import (
 )
 from screentime.theme import COLORS
 from screentime.tray_icon import TrayIcon
+from screentime.ui.toast import show_achievement
 from screentime.updater import check_for_update, download_and_update
 
 
@@ -86,7 +87,7 @@ class ScreenTimeApp:
         self.gui._on_pomodoro_toggle = self._toggle_pomodoro
         self.gui._on_game_mode_toggle = self._toggle_game_mode
         self.gui._on_screen_lock_toggle = self._toggle_screen_lock
-        self.gui._on_screen_lock_hours_change = self._on_screen_lock_hours_change
+        self.gui._on_screen_lock_change = self._on_screen_lock_change
         self.gui._on_shutdown_change = self._on_shutdown_change_from_gui
         self.gui._on_shutdown_now = self._on_shutdown_now
         self.gui._on_shutdown_postpone = self._on_shutdown_postpone
@@ -319,11 +320,11 @@ class ScreenTimeApp:
         state = "activado" if enabled else "desactivado"
         _log(f"[Bloqueo de pantalla] {state}.")
 
-    def _on_screen_lock_hours_change(self, hours: int):
-        self.settings["screen_lock_hours"] = hours
+    def _on_screen_lock_change(self, minutes: int):
+        self.settings["screen_lock_minutes"] = int(minutes)
         save_settings(self.settings)
         self._screen_lock_triggered = False
-        _log(f"[Bloqueo] Bloquear despues de {hours}h.")
+        _log(f"[Bloqueo] Bloquear despues de {minutes} min.")
 
     # ─── Apagado automático ──────────────────────────────────────────────
 
@@ -469,29 +470,11 @@ class ScreenTimeApp:
 
     def _show_overlay(self, message: str):
         try:
-            import tkinter as tk
-
-            overlay = tk.Toplevel()
-            overlay.overrideredirect(True)
-            overlay.attributes("-topmost", True)
-            overlay.attributes("-alpha", 0.95)
-            overlay.configure(bg="#107C10")
-
-            sw = overlay.winfo_screenwidth()
-            overlay.geometry(f"380x90+{sw - 400}+20")
-
-            inner = tk.Frame(overlay, bg="#1a1a2e", padx=12, pady=8)
-            inner.pack(fill=tk.BOTH, expand=True)
-
-            tk.Label(inner, text="Screen Time", font=("Segoe UI", 10, "bold"),
-                     bg="#1a1a2e", fg="#107C10").pack(anchor="w")
-            tk.Label(inner, text=message, font=("Segoe UI", 9),
-                     bg="#1a1a2e", fg="#e0e0e0", wraplength=340, justify="left",
-                     anchor="w").pack(fill=tk.X, pady=(4, 0))
-
-            overlay_ms = self.settings.get("overlay_seconds", 8) * 1000
-            overlay.after(overlay_ms, lambda: overlay.destroy())
-            overlay.bind("<Button-1>", lambda e: overlay.destroy())
+            show_achievement(
+                self.gui.root,
+                message,
+                self.settings.get("overlay_seconds", 8),
+            )
         except Exception as e:
             _log(f"[Error] Overlay: {e}")
 
@@ -655,8 +638,7 @@ class ScreenTimeApp:
     def _check_screen_lock(self):
         if not self.settings.get("screen_lock_enabled", False):
             return
-        lock_hours = self.settings.get("screen_lock_hours", 4)
-        lock_seconds = lock_hours * 3600
+        lock_seconds = max(1, int(self.settings.get("screen_lock_minutes", 240))) * 60
         elapsed = self.logger.get_elapsed_seconds()
         if elapsed >= lock_seconds and not self._screen_lock_triggered:
             self._screen_lock_triggered = True

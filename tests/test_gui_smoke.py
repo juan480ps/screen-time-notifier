@@ -44,8 +44,11 @@ class GuiSmokeTests(unittest.TestCase):
         gui = MainGUI(UsageLogger(), _StubNotifier(), {})
         try:
             gui.create_window(start_minimized=True)
+            # Ventana pequeña para forzar overflow y poder probar el scroll.
+            gui.root.geometry("480x300")
             gui.root.update()
             gui.root.update_idletasks()
+            gui._update_scroll_state()
 
             before = gui._canvas.yview()
             for _ in range(3):
@@ -54,6 +57,8 @@ class GuiSmokeTests(unittest.TestCase):
             self.assertGreater(gui._canvas.yview()[0], before[0])
 
             if tk.TkVersion >= 9:
+                gui._canvas.yview_moveto(0.0)
+                gui.root.update()
                 before_touch = gui._canvas.yview()
                 for _ in range(10):
                     gui._canvas.event_generate("<TouchpadScroll>", delta=65496)
