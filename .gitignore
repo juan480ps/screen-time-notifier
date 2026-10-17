@@ -15,6 +15,7 @@ build/
 *.egg-info/
 *.egg
 *.spec
+!ScreenTimeNotifier.spec
 
 # IDE
 .vscode/

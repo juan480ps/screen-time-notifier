@@ -22,6 +22,7 @@ Monitor de tiempo en pantalla para Windows con notificaciones estilo Xbox.
 - **Recordar ventana** — Guarda y restaura el tamano/posicion de la ventana.
 - **Inicio automatico** — Opcion para iniciar con Windows.
 - **Sonido Xbox** — Notificacion con sonido original de Xbox Game Bar.
+- **Panel de recursos** — CPU, RAM y GPU en tiempo real dentro de la app (gauges + histórico).
 
 ## Demo
 
@@ -75,21 +76,29 @@ screen-time-notifier/
 │   ├── icon.ico                  # Icono de la aplicacion
 │   └── sounds/
 │       └── notify.mp3            # Sonido de notificación Xbox
-├── tests/
-│   └── test_units.py             # Tests unitarios (unittest)
+├── tests/                        # Tests (unittest)
+│   ├── test_units.py
+│   ├── test_gui_smoke.py
+│   └── test_monitoring.py
 └── src/
     └── screentime/               # Paquete principal
         ├── __init__.py           # Version y metadata
         ├── __main__.py           # Entry point: python -m screentime
         ├── app.py                # Orquestador principal (ScreenTimeApp)
         ├── config.py             # Configuraciones y persistencia JSON
+        ├── config_env.py         # Config por entorno (tipada/validada)
+        ├── logging_setup.py      # Logging estructurado con rotacion
         ├── logger.py             # Registro de uso y estadisticas
         ├── notifier.py           # Timer de notificaciones + sonido
         ├── gui.py                # Interfaz grafica (tkinter + canvas)
+        ├── theme.py              # Design tokens (colores, fuentes)
+        ├── dialogs.py            # Dialogos auxiliares
         ├── tray_icon.py          # System tray (pystray)
         ├── pomodoro.py           # Temporizador Pomodoro
         ├── fullscreen_detector.py # Deteccion de pantalla completa (Win32)
-        └── shutdown.py           # Apagado automatico programado (shutdown.exe)
+        ├── shutdown.py           # Apagado automatico programado (shutdown.exe)
+        ├── ui/                   # Widgets y toast animado
+        └── monitoring/           # Muestreo CPU/RAM/GPU (in-app)
 ```
 
 ## Uso
@@ -144,6 +153,29 @@ En la tarjeta **APAGADO AUTOMATICO** de la ventana principal:
 - **Cancelar apagado** ejecuta `shutdown /a` y deja la programacion desactivada.
 - Si cierras la aplicacion con un apagado pendiente, se cancela para no apagar el equipo sin querer.
 
+## Panel de recursos
+
+Tarjeta **RECURSOS** dentro de la ventana principal (columna izquierda):
+gauges de CPU, RAM y GPU + histórico tipo time-series. Muestrea CPU/RAM con
+`psutil` y GPU vía los contadores de rendimiento de Windows (cualquier GPU:
+AMD/Intel/NVIDIA; `nvidia-smi` como alternativa) en un hilo daemon con
+throttling configurable; la UI solo lee el último snapshot, sin bloquearse.
+
+| Variable | Defecto | Descripcion |
+|----------|---------|-------------|
+| `SCREENTIME_MONITOR` | `1` | Muestra/oculta el panel (`0` lo desactiva) |
+| `SCREENTIME_MONITOR_INTERVAL` | `2.0` | Segundos entre muestras CPU/RAM (0.5–60) |
+| `SCREENTIME_MONITOR_GPU_INTERVAL` | `5.0` | Segundos entre muestras de GPU (1–60) |
+| `SCREENTIME_MONITOR_HISTORY` | `60` | Puntos de historial (10–3600) |
+| `SCREENTIME_HISTORY_RETENTION_DAYS` | `365` | Retención del historial (30–3650) |
+| `SCREENTIME_LOG_LEVEL` | `INFO` | Nivel de logging estructurado |
+
+**Rendimiento:** el historial vive en caché en memoria (sin lecturas de disco
+por segundo), se poda por retención, la UI no redibuja con la ventana oculta,
+la GPU se muestrea cada 5 s y el update-check automático se cachea 24 h.
+
+Si Windows no expone el contador de GPU, se muestra `N/D` sin errores.
+
 ## Desarrollo
 
 ```bash
@@ -178,6 +210,7 @@ El ejecutable incluye Python, todas las librerias y assets empaquetados. Funcion
 - **tkinter** — Interfaz grafica
 - **pystray** — System tray icon
 - **Pillow** — Generacion de iconos
+- **psutil** — Metricas de CPU y RAM
 - **pygame** / **pygame-ce** — Reproduccion de sonido
 - **PyInstaller** — Empaquetado como .exe standalone
 - **Win32 API** — Deteccion de fullscreen y registro de Windows

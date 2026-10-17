@@ -1,4 +1,4 @@
-"""Sistema de registro y historial de uso."""
+"""Sistema de registro y historial de uso (con caché en memoria)."""
 
 import json
 import os
@@ -6,12 +6,28 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from screentime.config import DATA_DIR, HISTORY_FILE
+from screentime.config_env import get_int
+
+
+def _empty_data() -> dict:
+    return {"daily_sessions": {}, "total_usage_seconds": 0}
 
 
 class UsageLogger:
-    """Gestiona el registro de sesiones de uso del PC."""
+    """Gestiona el registro de sesiones de uso del PC.
 
-    def __init__(self):
+    El historial se mantiene en memoria y solo se escribe al guardar una
+    sesión (reset/salida). Así la UI puede consultar estadísticas cada segundo
+    sin tocar disco ni reparsear JSON.
+    """
+
+    def __init__(self, retention_days: Optional[int] = None):
+        self._retention_days = (
+            max(1, int(retention_days))
+            if retention_days is not None
+            else get_int("SCREENTIME_HISTORY_RETENTION_DAYS", 365, 30, 3650)
+        )
+        self._data: Optional[dict] = None
         self._ensure_file()
         self.session_start = datetime.now()
         self.total_pause_seconds = 0.0
@@ -21,20 +37,23 @@ class UsageLogger:
     def _ensure_file(self):
         os.makedirs(DATA_DIR, exist_ok=True)
         if not os.path.exists(HISTORY_FILE):
-            self._save_data({"daily_sessions": {}, "total_usage_seconds": 0})
+            self._save_data(_empty_data())
 
     def _load_data(self) -> dict:
+        if self._data is not None:
+            return self._data
         try:
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, IOError):
-            return {"daily_sessions": {}, "total_usage_seconds": 0}
+            data = _empty_data()
 
         # Normaliza historiales antiguos o incompletos.
         if not isinstance(data, dict):
-            return {"daily_sessions": {}, "total_usage_seconds": 0}
+            data = _empty_data()
         data.setdefault("daily_sessions", {})
         data.setdefault("total_usage_seconds", 0)
+        self._data = data
         return data
 
     def get_history(self) -> dict:
@@ -42,11 +61,23 @@ class UsageLogger:
         return self._load_data()
 
     def _save_data(self, data: dict):
+        self._data = data
         try:
             with open(HISTORY_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
         except IOError:
             pass
+
+    def _prune(self, data: dict):
+        """Elimina días fuera de la retención configurada."""
+        cutoff = date.today() - timedelta(days=self._retention_days)
+        daily = data.get("daily_sessions", {})
+        for key in list(daily.keys()):
+            try:
+                if date.fromisoformat(key) < cutoff:
+                    del daily[key]
+            except (ValueError, TypeError):
+                continue
 
     def pause(self):
         if not self._is_paused:
@@ -115,6 +146,7 @@ class UsageLogger:
         data["daily_sessions"][today]["total_seconds"] += session_data["duration_seconds"]
         data["total_usage_seconds"] += session_data["duration_seconds"]
 
+        self._prune(data)
         self._save_data(data)
 
     def get_today_stats(self) -> dict:

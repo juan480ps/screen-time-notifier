@@ -1,9 +1,11 @@
 """Tests unitarios basicos de Screen Time Notifier."""
 
+import json
 import os
 import sys
 import tempfile
 import unittest
+from datetime import date, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
@@ -60,6 +62,17 @@ class LoggerTests(unittest.TestCase):
     def test_elapsed_is_non_negative(self):
         log = UsageLogger()
         self.assertGreaterEqual(log.get_elapsed_seconds(), 0)
+
+    def test_retention_prunes_old_days(self):
+        old = (date.today() - timedelta(days=10)).isoformat()
+        with open(logger_module.HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump({"daily_sessions": {old: {"sessions": [], "total_seconds": 60}},
+                       "total_usage_seconds": 60}, f)
+        log = UsageLogger(retention_days=5)
+        log.save_session()
+        data = log.get_history()
+        self.assertNotIn(old, data["daily_sessions"])
+        self.assertIn(date.today().isoformat(), data["daily_sessions"])
 
     def test_format_seconds(self):
         log = UsageLogger()

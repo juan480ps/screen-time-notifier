@@ -15,6 +15,7 @@ from screentime.theme import (
     SPACING,
     unpack_touchpad_delta,
 )
+from screentime.ui.resources import ResourcePanel
 from screentime.ui.widgets import (
     BarProgress,
     Card,
@@ -91,6 +92,8 @@ class MainGUI:
         self._suppress_callbacks = False
         self._shutdown_emit_job = None
         self._daily_goal_hours = 8
+        self.resource_panel = None
+        self._monitor_sampler = None
 
     # ─── Ventana ─────────────────────────────────────────────────────────
 
@@ -107,7 +110,7 @@ class MainGUI:
 
         self._create_vars()
         self.root.title(f"{get_app_name()} v{get_app_version()}")
-        self.root.minsize(820, 500)
+        self.root.minsize(1246, 690)
         self.root.configure(bg=COLORS["bg_dark"])
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -133,13 +136,13 @@ class MainGUI:
             except Exception:
                 used_saved_geo = False
         if not used_saved_geo:
-            self.root.geometry("1160x680")
+            self.root.geometry("1280x700")
             if not start_minimized:
                 self._center_window()
 
         self._build_ui()
-        self._start_update_loop()
         self._visible = not start_minimized
+        self._start_update_loop()
         return self.root
 
     def _create_vars(self):
@@ -193,37 +196,34 @@ class MainGUI:
             pass
 
         content = tk.Frame(self._scroll_frame, bg=COLORS["bg_dark"])
-        content.pack(fill=tk.X, padx=18, pady=(10, 16))
+        content.pack(fill=tk.X, padx=11, pady=(10, 16))
 
         self._build_header(content)
 
-        cols = tk.Frame(content, bg=COLORS["bg_dark"])
-        cols.pack(fill=tk.BOTH, expand=True)
-        for c in range(3):
-            cols.columnconfigure(c, weight=1, uniform="col")
+        grid = tk.Frame(content, bg=COLORS["bg_dark"])
+        grid.pack(fill=tk.BOTH, expand=True)
+        for c in range(4):
+            grid.columnconfigure(c, weight=1, uniform="col")
 
-        left = tk.Frame(cols, bg=COLORS["bg_dark"])
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        mid = tk.Frame(cols, bg=COLORS["bg_dark"])
-        mid.grid(row=0, column=1, sticky="nsew", padx=8)
-        right = tk.Frame(cols, bg=COLORS["bg_dark"])
-        right.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
+        for c, title in enumerate(("RESUMEN", "ENFOQUE", "RECURSOS", "SISTEMA")):
+            self._grid_header(grid, title, c)
 
-        self._section(left, "RESUMEN")
-        self._build_hero(left)
-        self._build_stats(left)
-        self._build_weekly(left)
+        # Fila 1
+        self._build_hero(self._grid_cell(grid, 1, 0))
+        self._build_config(self._grid_cell(grid, 1, 1))
+        self._build_resources(self._grid_cell(grid, 1, 2))
+        self._build_shutdown(self._grid_cell(grid, 1, 3))
 
-        self._section(mid, "ENFOQUE")
-        self._build_config(mid)
-        self._card_meta(mid)
-        self._card_pomodoro(mid)
-        self._card_game(mid)
+        # Fila 2
+        self._build_stats(self._grid_cell(grid, 2, 0))
+        self._card_meta(self._grid_cell(grid, 2, 1))
+        self._card_game(self._grid_cell(grid, 2, 2))
+        self._build_startup(self._grid_cell(grid, 2, 3))
 
-        self._section(right, "BIENESTAR")
-        self._card_lock(right)
-        self._build_shutdown(right)
-        self._build_startup(right)
+        # Fila 3
+        self._build_weekly(self._grid_cell(grid, 3, 0))
+        self._card_pomodoro(self._grid_cell(grid, 3, 1))
+        self._card_lock(self._grid_cell(grid, 3, 2))
 
         self._build_footer(content)
         self._update_shutdown_widgets()
@@ -246,38 +246,39 @@ class MainGUI:
 
     def _build_hero(self, parent):
         card = Card(parent)
-        card.pack(fill=tk.X, pady=(0, SPACING["md"]))
+        card.pack(fill=tk.BOTH, expand=True)
         self.ring = RingProgress(card.body, size=140, thickness=12)
         self.ring.pack(pady=(SPACING["sm"], SPACING["md"]))
         tk.Label(card.body, text="PROGRESO DE SESIÓN", font=FONTS["tiny"],
                  fg=COLORS["text_muted"], bg=COLORS["surface"]).pack(anchor="w")
-        self.progress_bar = BarProgress(card.body, height=16)
+        self.progress_bar = BarProgress(card.body, height=16, width=1)
         self.progress_bar.pack(fill=tk.X, pady=(SPACING["xs"], 0))
 
     def _build_stats(self, parent):
         row = tk.Frame(parent, bg=COLORS["bg_dark"])
-        row.pack(fill=tk.X, pady=(0, SPACING["md"]))
+        row.pack(fill=tk.BOTH, expand=True)
         for i, (label, var, color) in enumerate((
             ("Total hoy", self.today_total_var, COLORS["accent_neon"]),
             ("Sesiones", self.sessions_var, COLORS["accent_green_light"]),
-            ("Sesión actual", self.session_var, COLORS["text_primary"]),
+            ("Actual", self.session_var, COLORS["text_primary"]),
         )):
             tile = StatTile(row, label, var, color)
             tile.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0 if i == 0 else 6, 0))
 
     def _build_config(self, parent):
         card = Card(parent, title="CONFIGURACIÓN")
-        card.pack(fill=tk.X, pady=(0, SPACING["md"]))
+        card.pack(fill=tk.BOTH, expand=True)
         row = tk.Frame(card.body, bg=COLORS["surface"])
         row.pack(fill=tk.X)
         tk.Label(row, text="Aviso cada", font=FONTS["body"], fg=COLORS["text_secondary"],
                  bg=COLORS["surface"]).pack(side=tk.LEFT)
-        self.interval_spinner = self._spinbox(row, self.interval_val_var, 1, 120, width=4)
-        self.interval_spinner.pack(side=tk.LEFT, padx=(8, 6))
+        self.interval_spinner = self._spinbox(row, self.interval_val_var, 1, 120, width=3)
+        self.interval_spinner.pack(side=tk.LEFT, padx=(6, 4))
         self.interval_unit_menu = self._option_menu(row, self.interval_unit_var,
-                                                    ("Segundos", "Minutos", "Horas"), width=9)
+                                                    ("Segundos", "Minutos", "Horas"), width=7)
         self.interval_unit_menu.pack(side=tk.LEFT)
-        make_button(row, "Aplicar", self._on_apply_interval, kind="primary").pack(side=tk.LEFT, padx=(8, 0))
+        make_button(row, "Aplicar", self._on_apply_interval, kind="primary",
+                    pad=(10, 5)).pack(side=tk.LEFT, padx=(6, 0))
 
         row2 = tk.Frame(card.body, bg=COLORS["surface"])
         row2.pack(fill=tk.X, pady=(SPACING["md"], 0))
@@ -287,21 +288,47 @@ class MainGUI:
         self.overlay_spinner.pack(side=tk.LEFT, padx=(8, 6))
         tk.Label(row2, text="segundos", font=FONTS["small"], fg=COLORS["text_muted"],
                  bg=COLORS["surface"]).pack(side=tk.LEFT)
+        tk.Label(card.body, text="Los cambios se guardan automáticamente.",
+                 font=FONTS["tiny"], fg=COLORS["text_muted"], bg=COLORS["surface"],
+                 anchor="w").pack(side=tk.BOTTOM, fill=tk.X, pady=(SPACING["sm"], 0))
         self.interval_unit_var.trace_add("write", self._on_unit_change_inline)
 
     def _build_weekly(self, parent):
         card = Card(parent, title="ACTIVIDAD SEMANAL")
-        card.pack(fill=tk.X, pady=(0, SPACING["md"]))
-        self.week_chart = WeekChart(card.body, height=50)
+        card.pack(fill=tk.BOTH, expand=True)
+        self.week_chart = WeekChart(card.body, height=50, width=1)
         self.week_chart.pack(fill=tk.X)
 
-    def _section(self, parent, text):
-        tk.Label(parent, text=text, font=FONTS["section"], fg=COLORS["text_muted"],
-                 bg=COLORS["bg_dark"]).pack(anchor="w", pady=(0, SPACING["sm"]))
+    def _build_resources(self, parent):
+        """Panel in-app de CPU/RAM/GPU (opcional por flag de entorno)."""
+        from screentime.monitoring import create_sampler
+
+        sampler = create_sampler()
+        if sampler is None:
+            return
+        panel = ResourcePanel(parent, capacity=60)
+        panel.pack(fill=tk.BOTH, expand=True)
+        try:
+            sampler.start()
+        except Exception:
+            panel.destroy()
+            sampler.stop()
+            return
+        self.resource_panel = panel
+        self._monitor_sampler = sampler
+
+    def _grid_header(self, grid, text, column):
+        tk.Label(grid, text=text, font=FONTS["section"], fg=COLORS["text_muted"],
+                 bg=COLORS["bg_dark"]).grid(row=0, column=column, sticky="w", padx=7, pady=(0, 6))
+
+    def _grid_cell(self, grid, row, column):
+        cell = tk.Frame(grid, bg=COLORS["bg_dark"])
+        cell.grid(row=row, column=column, sticky="nsew", padx=7, pady=(0, 10))
+        return cell
 
     def _card_meta(self, parent):
         card = Card(parent)
-        card.pack(fill=tk.X, pady=(0, SPACING["sm"]))
+        card.pack(fill=tk.BOTH, expand=True)
         self._toggle_row(card.body, "Meta diaria", self.daily_goal_enabled,
                          self._on_daily_goal_toggle_click)
         row = tk.Frame(card.body, bg=COLORS["surface"])
@@ -310,13 +337,13 @@ class MainGUI:
         self.goal_hours_spinner.pack(side=tk.LEFT)
         tk.Label(row, text="horas máximo al día", font=FONTS["small"], fg=COLORS["text_secondary"],
                  bg=COLORS["surface"]).pack(side=tk.LEFT, padx=(8, 0))
-        self.goal_bar = BarProgress(card.body, height=14)
+        self.goal_bar = BarProgress(card.body, height=14, width=1)
         self.goal_bar.pack(fill=tk.X, pady=(SPACING["sm"], 0))
         self.daily_goal_hours_var.trace_add("write", self._on_goal_hours_change)
 
     def _card_pomodoro(self, parent):
         card = Card(parent)
-        card.pack(fill=tk.X, pady=(0, SPACING["sm"]))
+        card.pack(fill=tk.BOTH, expand=True)
         self._toggle_row(card.body, "Pomodoro", self.pomodoro_enabled, self._on_pomodoro_toggle_click)
         info = tk.Frame(card.body, bg=COLORS["surface"])
         info.pack(fill=tk.X, pady=(SPACING["sm"], SPACING["sm"]))
@@ -337,13 +364,13 @@ class MainGUI:
 
     def _card_game(self, parent):
         card = Card(parent)
-        card.pack(fill=tk.X, pady=(0, SPACING["sm"]))
+        card.pack(fill=tk.BOTH, expand=True)
         self._toggle_row(card.body, "Modo juego", self.game_mode_enabled,
                          self._on_game_mode_toggle_click, right_factory=self._make_game_dot)
 
     def _card_lock(self, parent):
         card = Card(parent)
-        card.pack(fill=tk.X, pady=(0, SPACING["sm"]))
+        card.pack(fill=tk.BOTH, expand=True)
         self._toggle_row(card.body, "Bloqueo de pantalla", self.screen_lock_enabled,
                          self._on_screen_lock_toggle_click)
         row = tk.Frame(card.body, bg=COLORS["surface"])
@@ -352,14 +379,14 @@ class MainGUI:
                  bg=COLORS["surface"]).pack(side=tk.LEFT)
         self.lock_val_spinner = self._spinbox(row, self.lock_val_var, 1, 12, width=3)
         self.lock_val_spinner.pack(side=tk.LEFT, padx=(8, 6))
-        self.lock_unit_menu = self._option_menu(row, self.lock_unit_var, ("Minutos", "Horas"), width=8)
+        self.lock_unit_menu = self._option_menu(row, self.lock_unit_var, ("Minutos", "Horas"), width=7)
         self.lock_unit_menu.pack(side=tk.LEFT)
         self.lock_val_var.trace_add("write", self._on_lock_change)
         self.lock_unit_var.trace_add("write", self._on_lock_unit_change)
 
     def _build_shutdown(self, parent):
         card = Card(parent)
-        card.pack(fill=tk.X, pady=(0, SPACING["sm"]))
+        card.pack(fill=tk.BOTH, expand=True)
         self._toggle_row(card.body, "Apagado automático", self.shutdown_enabled,
                          self._on_shutdown_toggle_click)
 
@@ -374,7 +401,7 @@ class MainGUI:
         tk.Label(mode_row, text="Modo:", font=FONTS["small"], fg=COLORS["text_secondary"],
                  bg=COLORS["surface"]).pack(side=tk.LEFT)
         self.shutdown_mode_menu = self._option_menu(mode_row, self.shutdown_mode_var,
-                                                    tuple(SHUTDOWN_MODE_KEYS.keys()), width=12)
+                                                    tuple(SHUTDOWN_MODE_KEYS.keys()), width=9)
         self.shutdown_mode_menu.pack(side=tk.LEFT, padx=(8, 0))
 
         self.shutdown_time_row = tk.Frame(card.body, bg=COLORS["surface"])
@@ -442,14 +469,14 @@ class MainGUI:
 
     def _build_startup(self, parent):
         card = Card(parent)
-        card.pack(fill=tk.X, pady=(0, SPACING["md"]))
+        card.pack(fill=tk.BOTH, expand=True)
         self._toggle_row(card.body, "Iniciar con Windows", self.auto_start_var,
                          self._on_autostart_toggle_click)
         self._toggle_row(card.body, "Iniciar minimizado", self.start_minimized_var,
                          self._on_start_minimized_toggle_click, top_pad=SPACING["sm"])
         tk.Label(card.body, text="Minimizado: la ventana no se abre hasta clic en el icono.",
                  font=FONTS["tiny"], fg=COLORS["text_muted"], bg=COLORS["surface"],
-                 wraplength=280, justify="left").pack(anchor="w", pady=(SPACING["sm"], 0))
+                 wraplength=240, justify="left").pack(anchor="w", pady=(SPACING["sm"], 0))
 
     def _build_footer(self, parent):
         footer = tk.Frame(parent, bg=COLORS["bg_dark"])
@@ -522,6 +549,8 @@ class MainGUI:
             self._update_job = self.root.after(1000, self._start_update_loop)
 
     def _update_display(self):
+        if not self._visible:
+            return  # ventana oculta: no gastar CPU redibujando
         try:
             elapsed_str = self.logger.get_elapsed_short()
             self.time_var.set(elapsed_str)
@@ -541,6 +570,8 @@ class MainGUI:
             self._draw_progress(stats["current_session_seconds"])
             self._draw_goal(stats["total_seconds"])
             self._draw_week_chart()
+            if self._monitor_sampler is not None and self.resource_panel is not None:
+                self.resource_panel.update_history(self._monitor_sampler.history())
         except Exception:
             pass
 
@@ -879,6 +910,7 @@ class MainGUI:
             self.root.lift()
             self.root.focus_force()
             self._visible = True
+            self._update_display()
 
     def hide(self):
         if self.root:
@@ -903,6 +935,13 @@ class MainGUI:
 
     def destroy(self):
         self._cancel_shutdown_emit()
+        if self._monitor_sampler is not None:
+            try:
+                self._monitor_sampler.stop()
+            except Exception:
+                pass
+            self._monitor_sampler = None
+            self.resource_panel = None
         if self._update_job and self.root:
             self.root.after_cancel(self._update_job)
         if self.root:

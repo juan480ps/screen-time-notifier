@@ -10,7 +10,7 @@ import urllib.request
 from typing import Optional
 
 from screentime import __version__
-from screentime.filelog import append_log
+from screentime.logging_setup import get_logger
 
 GITHUB_REPO = "juan480ps/screen-time-notifier"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -35,8 +35,11 @@ def _parse_version(v: str) -> tuple:
         return (0, 0, 0)
 
 
+_LOG = get_logger("updater")
+
+
 def _log(msg: str):
-    append_log(msg)
+    _LOG.info(msg)
 
 
 def check_for_update() -> Optional[dict]:

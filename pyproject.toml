@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "screen-time-notifier"
-version = "1.6.1"
+version = "1.7.1"
 description = "Monitor de tiempo en pantalla para Windows con notificaciones estilo Xbox"
 readme = "README.md"
 license = {text = "MIT"}
@@ -12,6 +12,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pystray>=0.19.5",
     "Pillow>=10.0.0",
+    "psutil>=5.9",
     # pygame no publica ruedas para Python 3.14+, se usa su fork compatible pygame-ce
     "pygame>=2.6.0; python_version < '3.14'",
     "pygame-ce>=2.5.3; python_version >= '3.14'",

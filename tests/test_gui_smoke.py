@@ -45,6 +45,7 @@ class GuiSmokeTests(unittest.TestCase):
         try:
             gui.create_window(start_minimized=True)
             # Ventana pequeña para forzar overflow y poder probar el scroll.
+            gui.root.minsize(300, 200)
             gui.root.geometry("480x300")
             gui.root.update()
             gui.root.update_idletasks()

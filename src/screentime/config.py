@@ -54,6 +54,7 @@ DEFAULT_SETTINGS = {
     "shutdown_warn_minutes": 5,
     "start_minimized": True,
     "window_geometry": None,
+    "last_update_check": 0,
 }
 
 

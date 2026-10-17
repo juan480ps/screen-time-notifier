@@ -7,15 +7,16 @@ import os
 import queue
 import sys
 import threading
+import time
 from datetime import date
 from typing import Callable
 
 from screentime.config import get_app_name, get_app_version, load_settings, save_settings
 from screentime.dialogs import IntervalDialog
-from screentime.filelog import append_log
 from screentime.fullscreen_detector import FullscreenDetector
 from screentime.gui import MainGUI
 from screentime.logger import UsageLogger
+from screentime.logging_setup import get_logger
 from screentime.notifier import ScreenTimeNotifier
 from screentime.pomodoro import PomodoroState, PomodoroTimer
 from screentime.shutdown import (
@@ -32,11 +33,12 @@ from screentime.tray_icon import TrayIcon
 from screentime.ui.toast import show_achievement
 from screentime.updater import check_for_update, download_and_update
 
+_LOG = get_logger("app")
+
 
 def _log(msg: str):
-    """Escribe un mensaje al log y a stdout."""
-    append_log(msg)
-    print(msg)
+    """Escribe un mensaje al log estructurado."""
+    _LOG.info(msg)
 
 
 class ScreenTimeApp:
@@ -113,22 +115,25 @@ class ScreenTimeApp:
             )
             self.fullscreen_detector.start()
 
+        # Los callbacks del tray corren en el hilo de pystray: se marshalling
+        # al hilo principal de tkinter para evitar crashes.
         self.tray.set_callbacks(
-            on_show=self._on_show_time,
-            on_reset=self._on_reset,
-            on_pause_toggle=self._on_pause_toggle,
-            on_configure=self._on_configure,
-            on_autostart_toggle=self._on_autostart_toggle,
-            on_minimized_toggle=self._on_minimized_toggle,
-            on_shutdown_toggle=self._on_shutdown_toggle,
-            on_shutdown_now=self._on_shutdown_now,
-            on_shutdown_postpone=self._on_shutdown_postpone,
-            on_shutdown_cancel=self._on_shutdown_cancel,
-            on_check_update=self._on_check_update,
-            on_quit=self._on_quit,
+            on_show=self._ui(self._on_show_time),
+            on_reset=self._ui(self._on_reset),
+            on_pause_toggle=self._ui(self._on_pause_toggle),
+            on_configure=self._ui(self._on_configure),
+            on_autostart_toggle=self._ui(self._on_autostart_toggle),
+            on_minimized_toggle=self._ui(self._on_minimized_toggle),
+            on_shutdown_toggle=self._ui(self._on_shutdown_toggle),
+            on_shutdown_now=self._ui(self._on_shutdown_now),
+            on_shutdown_postpone=self._ui(self._on_shutdown_postpone),
+            on_shutdown_cancel=self._ui(self._on_shutdown_cancel),
+            on_check_update=self._ui(self._on_check_update),
+            on_quit=self._ui(self._on_quit),
         )
 
         self._tray_update_running = False
+        self._tray_tick = 0
         atexit.register(self._cleanup)
 
     def run(self):
@@ -205,16 +210,30 @@ class ScreenTimeApp:
         """Agenda una tarea para que corra en el hilo principal de tkinter."""
         self._ui_tasks.put(task)
 
+    def _ui(self, callback: Callable) -> Callable:
+        """Envuelve un callback para ejecutarlo en el hilo principal de Tk."""
+
+        def _run():
+            self._post_ui(callback)
+
+        return _run
+
     # ─── Auto-actualizacion ──────────────────────────────────────────────
 
     def _startup_update_check(self):
-        """Verifica actualizaciones al iniciar (en background)."""
-        import time
+        """Verifica actualizaciones al iniciar (caché 24 h, en background)."""
+        last = float(self.settings.get("last_update_check", 0) or 0)
+        if time.time() - last < 86400:
+            _log("[Update] Chequeo omitido (cache 24h).")
+            return
         time.sleep(5)
         info = check_for_update()
         if isinstance(info, dict):
             self.tray.set_update_available(info["version"])
             _log(f"[Update] Nueva version disponible: {info['version']}")
+        if info is not None:
+            self.settings["last_update_check"] = time.time()
+            save_settings(self.settings)
 
     def _on_check_update(self):
         """Callback del tray: buscar e instalar actualizacion."""
@@ -226,6 +245,9 @@ class ScreenTimeApp:
                 return
             _log("[Update] Buscando actualizaciones...")
             info = check_for_update()
+            if info is not None:
+                self.settings["last_update_check"] = time.time()
+                save_settings(self.settings)
             if info is True:
                 self._notification_queue.put(("Ya tienes la ultima version.", False))
                 return
@@ -244,7 +266,6 @@ class ScreenTimeApp:
             if ok:
                 _log("[Update] Actualizacion descargada. Reiniciando...")
                 self._notification_queue.put(("Actualizacion instalada. Reiniciando...", False))
-                import time
                 time.sleep(2)
                 os._exit(0)
             else:
@@ -441,7 +462,7 @@ class ScreenTimeApp:
 
     def _update_shutdown_status(self):
         """Refresca el texto de estado en la ventana (solo hilo principal)."""
-        if self.gui.root:
+        if self.gui.root and self.gui.is_visible:
             try:
                 self.gui.set_shutdown_status(self.shutdown.status_text())
             except Exception:
@@ -487,15 +508,17 @@ class ScreenTimeApp:
             return
 
         try:
-            elapsed = self.logger.get_elapsed_short()
-            self.tray.update_state(
-                is_paused=self.notifier.is_paused,
-                auto_start=self.settings.get("auto_start", False),
-                current_time=elapsed,
-                shutdown_status=self.shutdown.short_status(),
-                shutdown_enabled=self.shutdown.is_enabled,
-                start_minimized=self.settings.get("start_minimized", True),
-            )
+            self._tray_tick += 1
+            if self._tray_tick % 2 == 1:  # título/menú cada 2 s; estado cada 1 s
+                elapsed = self.logger.get_elapsed_short()
+                self.tray.update_state(
+                    is_paused=self.notifier.is_paused,
+                    auto_start=self.settings.get("auto_start", False),
+                    current_time=elapsed,
+                    shutdown_status=self.shutdown.short_status(),
+                    shutdown_enabled=self.shutdown.is_enabled,
+                    start_minimized=self.settings.get("start_minimized", True),
+                )
             self._update_shutdown_status()
         except Exception:
             pass
@@ -625,12 +648,12 @@ class ScreenTimeApp:
 
     def _on_fullscreen_enter(self):
         if self.settings.get("game_mode_enabled", False):
-            self.gui.game_status_dot.configure(fg=COLORS["accent_green_light"])
+            self._post_ui(lambda: self.gui.game_status_dot.configure(fg=COLORS["accent_green_light"]))
             _log("[Modo Juego] Pantalla completa detectada.")
 
     def _on_fullscreen_exit(self):
         if self.settings.get("game_mode_enabled", False):
-            self.gui.game_status_dot.configure(fg=COLORS["text_secondary"])
+            self._post_ui(lambda: self.gui.game_status_dot.configure(fg=COLORS["text_secondary"]))
             _log("[Modo Juego] Pantalla completa terminada.")
 
     # ─── Bloqueo de pantalla ─────────────────────────────────────────────
